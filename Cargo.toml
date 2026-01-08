@@ -1,0 +1,57 @@
+[package]
+name = "ironwal"
+version = "0.5.0"
+edition = "2024"
+
+description = "A high performance, high durability, deterministic Write-Ahead Log (WAL) for reliable systems of record."
+authors = ["Excerion Sun <dev@excsn.com>"]
+license = "MPL-2.0"
+repository = "https://github.com/excsn/ironwal"
+documentation = "https://docs.rs/ironwal"
+readme = "README.md"
+keywords = ["wal", "ledger", "database", "persistence", "journal"]
+categories = ["database-implementations", "filesystem"]
+
+[features]
+default = ["compression"]
+compression = ["dep:lz4_flex"]
+
+[dependencies]
+bytes = "1.11"
+crc32fast = "1.5"
+byteorder = "1.5"
+thiserror = "2"
+tracing = "0.1"
+chrono = "0.4"
+
+fs2 = "0.4"
+memmap2 = "0.9"
+
+lz4_flex = { version = "0.12", optional = true, features = ["frame"] }
+fibre_cache = "0.4"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.8"
+proptest = "1.9.0"
+rand = "0.9"
+serde_json = "1.0"
+tempfile = "3.24"
+tokio = { version = "1", features = ["full"] }
+
+[[bench]]
+name = "append_benchmark"
+harness = false
+
+[[bench]]
+name = "read_benchmark"
+harness = false
+
+[[bench]]
+name = "stress_benchmark"
+harness = false
+
+[[test]]
+name = "compression"
+required-features = ["compression"]
