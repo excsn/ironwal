@@ -180,7 +180,7 @@ impl ShardedWal {
     if all_same_shard {
       // Single-shard fast path
       let values: Vec<&[u8]> = entries.iter().map(|(_, v)| v.as_slice()).collect();
-      return self.append_batch_single_key(&entries[0].0, &values);
+      return self.append_batch_for_key(&entries[0].0, &values);
     }
 
     // Multi-shard path - use cached routing
@@ -226,7 +226,7 @@ impl ShardedWal {
   ///
   /// * `key` - The key associated with all values in the batch.
   /// * `values` - A slice of byte slices to append.
-  pub fn append_batch_single_key(&self, key: &[u8], values: &[&[u8]]) -> Result<Vec<(u16, u64)>> {
+  pub fn append_batch_for_key(&self, key: &[u8], values: &[&[u8]]) -> Result<Vec<(u16, u64)>> {
     if values.is_empty() {
       return Ok(Vec::new());
     }

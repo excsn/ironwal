@@ -1,6 +1,6 @@
 [package]
 name = "ironwal"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 
 description = "A high performance, high durability, deterministic Write-Ahead Log (WAL) for reliable systems of record."
