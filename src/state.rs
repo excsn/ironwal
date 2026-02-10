@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
-use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -17,7 +16,7 @@ pub struct StreamState {
 
 /// Metadata stored in the `head.state` file for each stream.
 /// This acts as a pointer to the active segment file, enabling fast recovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StreamStateFile {
   /// The filename of the current active segment (e.g., "0000000000001000.wal").
   pub active_segment_name: String,
