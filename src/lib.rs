@@ -50,4 +50,5 @@ pub mod sharded;
 pub use batch::TxnWriter;
 pub use config::{CompressionType, CorruptionPolicy, ReadStrategy, SyncMode, WalOptions};
 pub use error::{Error, Result};
+pub use iter::WalIterator;
 pub use wal::Wal;
