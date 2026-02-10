@@ -107,7 +107,7 @@ impl Default for WalOptions {
       root_path: PathBuf::from("./wal_data"),
       max_segment_size: 64 * 1024 * 1024, // 64 MB
       max_entries_per_segment: u64::MAX,
-      max_open_segments: 50,
+      max_open_segments: 128,
       write_buffer_size: 64 * 1024, // 64 KB
       read_buffer_size: 128 * 1024, // 128 KB
       block_cache_size: None,

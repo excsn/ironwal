@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9be8c4a2161902788a1cfa4356539ce185b79dc3399efcb65e312c73862388e8 # shrinks to actions = [AppendBatch { entries: [([0], [193, 14, 253, 254, 163, 74, 139, 151])] }]
+cc 600751234ea88123bacf528724b37b7a559842d265aec08a73e3e4788fed8eda # shrinks to actions = [CreateCheckpoint { checkpoint_id: [0] }, Restart, CreateCheckpoint { checkpoint_id: [1] }]

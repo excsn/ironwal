@@ -7,7 +7,7 @@ use std::path::Path;
 
 /// In-memory representation of a stream's state.
 #[derive(Debug, Clone)]
-pub struct StreamState {
+pub(crate) struct StreamState {
   /// The next sequence ID to be written.
   pub next_id: u64,
   /// The Start ID of the file we are currently appending to.
@@ -21,14 +21,14 @@ pub struct StreamStateFile {
   /// The filename of the current active segment (e.g., "0000000000001000.wal").
   pub active_segment_name: String,
   /// A version number for future format changes.
-  pub version: u32,
+  pub version: u8, //TODO, we currently don't use this and we should use it.
 }
 
 
 impl StreamStateFile {
   /// The conventional name for the state file.
   const FILENAME: &'static str = "head.state";
-  const VERSION: u8 = 1;
+  pub const VERSION: u8 = 1;
 
   /// Reads the state file from a given stream directory using a binary format.
   pub fn read_from(stream_dir: &Path) -> Result<Option<Self>> {
@@ -64,7 +64,7 @@ impl StreamStateFile {
 
     Ok(Some(Self {
       active_segment_name,
-      version: version as u32,
+      version: version,
     }))
   }
 

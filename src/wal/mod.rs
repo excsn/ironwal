@@ -52,7 +52,11 @@ pub struct WalState {
 }
 
 impl WalState {
-  fn get_or_create_segment(&self, stream: &str, state: &mut StreamState) -> Result<Arc<ActiveSegment>> {
+  fn get_or_create_segment(
+    &self,
+    stream: &str,
+    state: &mut StreamState,
+  ) -> Result<Arc<ActiveSegment>> {
     let stream_dir = util::ensure_safe_path(&self.options.root_path, stream)?;
     if !stream_dir.exists() {
       fs::create_dir_all(&stream_dir)?;
@@ -69,7 +73,11 @@ impl WalState {
 
     // 2. On miss, perform the I/O operation
     let exists = segment_path.exists();
-    let new_segment = ActiveSegment::create(segment_path.clone(), state.active_segment_start_id, &self.options)?;
+    let new_segment = ActiveSegment::create(
+      segment_path.clone(),
+      state.active_segment_start_id,
+      &self.options,
+    )?;
 
     if exists {
       // If we are opening an existing file for writing (e.g. after a restart),
@@ -78,7 +86,9 @@ impl WalState {
     }
 
     // 3. Insert the known-good segment into the cache. The cost is 1 (one file handle).
-    self.write_cache.insert(segment_path.clone(), new_segment, 1);
+    self
+      .write_cache
+      .insert(segment_path.clone(), new_segment, 1);
 
     // 4. Fetch it again to get the Arc managed by the cache.
     Ok(self.write_cache.fetch(&segment_path).unwrap())
@@ -106,7 +116,7 @@ impl WalState {
     // 4. Update Head State: Atomic Write
     let head_state = StreamStateFile {
       active_segment_name: segment_filename(state.active_segment_start_id),
-      version: 1,
+      version: StreamStateFile::VERSION,
     };
     head_state.write_to(&stream_dir)?;
 
@@ -143,7 +153,12 @@ impl WalState {
     Ok(range.start)
   }
 
-  fn write_batch(&self, stream: &str, state: &mut StreamState, entries: &[&[u8]]) -> Result<std::ops::Range<u64>> {
+  fn write_batch(
+    &self,
+    stream: &str,
+    state: &mut StreamState,
+    entries: &[&[u8]],
+  ) -> Result<std::ops::Range<u64>> {
     if entries.is_empty() {
       return Ok(state.next_id..state.next_id);
     }
@@ -163,7 +178,9 @@ impl WalState {
         let record_size_estimate = (entry.len() + 32) as u64;
 
         // If we have picked at least one entry, and this one overflows, stop here.
-        if chunk_byte_size + record_size_estimate > remaining_space && chunk_end_idx > entries_processed {
+        if chunk_byte_size + record_size_estimate > remaining_space
+          && chunk_end_idx > entries_processed
+        {
           break;
         }
 
@@ -293,7 +310,11 @@ impl Wal {
   /// Returns the Start ID of the currently active segment.
   /// Useful for monitoring rotation and testing.
   pub fn current_segment_start_id(&self, stream: &str) -> Option<u64> {
-    self.inner.streams.get(stream).map(|s| s.lock().active_segment_start_id)
+    self
+      .inner
+      .streams
+      .get(stream)
+      .map(|s| s.lock().active_segment_start_id)
   }
 
   /// Creates an iterator to read entries sequentially starting from `start_id`.
@@ -320,7 +341,10 @@ impl Wal {
       Ok(idx)
     } else {
       let idx = SegmentIndex::open(stream_dir)?;
-      self.inner.index_cache.insert(idx_path.to_path_buf(), idx, 1);
+      self
+        .inner
+        .index_cache
+        .insert(idx_path.to_path_buf(), idx, 1);
       Ok(self.inner.index_cache.fetch(idx_path).unwrap())
     }
   }
@@ -575,6 +599,89 @@ impl Wal {
     Ok(Some(result))
   }
 
+  /// Retrieves multiple entries by their IDs in a single operation.
+  /// This is significantly more efficient than calling `get()` multiple times
+  /// when using StandardIO read strategy.
+  pub fn get_batch(&self, stream: &str, ids: &[u64]) -> Result<Vec<Option<Vec<u8>>>> {
+    if ids.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
+    let idx_path = stream_dir.join(SegmentIndex::FILENAME);
+
+    // Load index once
+    let index = if let Some(idx) = self.inner.index_cache.fetch(&idx_path) {
+      idx
+    } else {
+      let idx = SegmentIndex::open(&stream_dir)?;
+      self.inner.index_cache.insert(idx_path.clone(), idx, 1);
+      self.inner.index_cache.fetch(&idx_path).unwrap()
+    };
+
+    // Group IDs by segment
+    let mut segment_groups: HashMap<u64, Vec<(usize, u64)>> = HashMap::new();
+    for (idx, &id) in ids.iter().enumerate() {
+      let segment_start_id = index.find_segment_start_id(id)?;
+      segment_groups
+        .entry(segment_start_id)
+        .or_default()
+        .push((idx, id));
+    }
+
+    // Pre-allocate results
+    let mut results = vec![None; ids.len()];
+
+    // Process each segment
+    for (segment_start_id, group) in segment_groups {
+      let segment_path = stream_dir.join(segment_filename(segment_start_id));
+
+      if !segment_path.exists() {
+        continue;
+      }
+
+      let mut reader = SegmentReader::open(&segment_path, &self.inner.options)?;
+
+      for (result_idx, id) in group {
+        let frame_loc = match reader.find_frame(id)? {
+          Some(loc) => loc,
+          None => continue,
+        };
+
+        // Check cache
+        let mut hasher = DefaultHasher::new();
+        stream.hash(&mut hasher);
+        let stream_hash = hasher.finish();
+
+        let cache_key = BlockCacheKey {
+          stream_hash,
+          segment_start_id,
+          frame_offset: frame_loc.offset,
+        };
+
+        let batch = if let Some(read_cache) = &self.inner.read_cache {
+          if let Some(cached_batch) = read_cache.fetch(&cache_key) {
+            cached_batch
+          } else {
+            let batch = reader.read_at(&frame_loc)?;
+            let weight = batch.iter().map(|v| v.len() as u64).sum::<u64>().max(1);
+            read_cache.insert(cache_key, batch.clone(), weight);
+            Arc::new(batch)
+          }
+        } else {
+          Arc::new(reader.read_at(&frame_loc)?)
+        };
+
+        let index_in_batch = (id - frame_loc.header.start_id) as usize;
+        if index_in_batch < batch.len() {
+          results[result_idx] = Some(batch[index_in_batch].clone());
+        }
+      }
+    }
+
+    Ok(results)
+  }
+
   // --- Maintenance ---
 
   /// Truncates the stream's history, deleting all segment files containing
@@ -654,7 +761,10 @@ impl Wal {
 
       self.inner.index_cache.invalidate(&idx_path);
       let current_index = self.get_or_load_index(&stream_dir, &idx_path)?;
-      let new_ids: Vec<u64> = current_index.iter().filter(|id| !deleted_ids.contains(id)).collect();
+      let new_ids: Vec<u64> = current_index
+        .iter()
+        .filter(|id| !deleted_ids.contains(id))
+        .collect();
 
       let temp_path = stream_dir.join("segments.idx.tmp");
       let final_path = stream_dir.join("segments.idx");
@@ -680,5 +790,18 @@ impl Wal {
     }
 
     Ok(deleted_ids.len())
+  }
+
+  /// Gets the current state of a stream (for watermark initialization).
+  ///
+  /// Returns None if the stream doesn't exist yet.
+  pub(crate) fn get_stream_state(&self, stream: &str) -> Result<Option<StreamState>> {
+    Ok(self.inner.streams.get(stream).map(|lock| {
+      let state = lock.lock();
+      StreamState {
+        next_id: state.next_id,
+        active_segment_start_id: state.active_segment_start_id,
+      }
+    }))
   }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "ironwal"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 
 description = "A high performance, high durability, deterministic Write-Ahead Log (WAL) for reliable systems of record."
@@ -15,6 +15,7 @@ categories = ["database-implementations", "filesystem"]
 [features]
 default = ["compression"]
 compression = ["dep:lz4_flex"]
+sharded = []
 
 [dependencies]
 bytes = "1.11"
@@ -51,6 +52,56 @@ harness = false
 name = "stress_benchmark"
 harness = false
 
+[[bench]]
+name = "sharded_append"
+harness = false
+required-features = ["sharded"]
+
+[[bench]]
+name = "sharded_checkpoint"
+harness = false
+required-features = ["sharded"]
+
+[[bench]]
+name = "sharded_concurrency"
+harness = false
+required-features = ["sharded"]
+
 [[test]]
 name = "compression"
 required-features = ["compression"]
+
+[[test]]
+name = "sharded_basic"
+path = "tests/sharded/basic.rs"
+required-features = ["sharded"]
+
+[[test]]
+name = "sharded_checkpoint"
+path = "tests/sharded/checkpoint.rs"
+required-features = ["sharded"]
+
+[[test]]
+name = "sharded_recovery"
+path = "tests/sharded/recovery.rs"
+required-features = ["sharded"]
+
+[[test]]
+name = "sharded_pruning"
+path = "tests/sharded/pruning.rs"
+required-features = ["sharded"]
+
+[[test]]
+name = "sharded_compaction"
+path = "tests/sharded/compaction.rs"
+required-features = ["sharded"]
+
+[[test]]
+name = "sharded_concurrency"
+path = "tests/sharded/concurrency.rs"
+required-features = ["sharded"]
+
+[[test]]
+name = "sharded_fuzz_properties"
+path = "tests/sharded/fuzz_properties.rs"
+required-features = ["sharded"]

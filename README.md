@@ -26,20 +26,59 @@ The library utilizes a strictly managed LRU cache for open file descriptors (`fi
 ### Tunable Durability
 Developers can choose between three synchronization modes: `Strict` (fsync on every write), `BatchOnly` (fsync only on batches/transactions), and `Async` (rely on OS page cache), allowing for precise trade-offs between latency and safety.
 
+### Horizontal Sharding (Optional)
+For applications requiring horizontal scaling, IronWal provides an optional `ShardedWal` extension that automatically routes writes to independent shards based on key hashing. This enables:
+- **Linear throughput scaling** with shard count
+- **Consistent checkpointing** across all shards for snapshot isolation
+- **User-addressable snapshots** (Raft indices, transaction IDs, ULIDs)
+- **Efficient pruning** of historical data before checkpoint boundaries
+
+Enable with the `sharded` feature:
+```toml
+[dependencies]
+ironwal = { version = "0.6.0", features = ["sharded"] }
+```
+
 ## Installation
 
 Add `ironwal` to your `Cargo.toml` dependencies:
 
 ```toml
 [dependencies]
-ironwal = "0.5.0"
+ironwal = "0.6"
 ```
 
 To enable LZ4 compression support (recommended), ensure the default features are active or explicitly enable `compression`:
 
 ```toml
 [dependencies]
-ironwal = { version = "0.5.0", features = ["compression"] }
+ironwal = { version = "0.6", features = ["compression"] }
+```
+
+## Sharded WAL Example
+```rust
+use ironwal::sharded::ShardedWal;
+use ironwal::WalOptions;
+
+// Create a sharded WAL with 16 independent shards
+let wal = ShardedWal::new(WalOptions::default(), 16)?;
+
+// Writes are automatically routed by key hash
+let (shard_id, seq_id) = wal.append(b"user_123", b"profile_data")?;
+
+// Create a consistent snapshot across all shards
+wal.create_checkpoint(b"snapshot_v1")?;
+
+// Restore from checkpoint
+let (checkpoint_id, data) = wal.load_latest_checkpoint()?;
+for shard_id in 0..16 {
+    let offset = data.offsets[shard_id as usize];
+    let mut iter = wal.iter_shard(shard_id, offset)?;
+    // Process entries from this shard...
+}
+
+// Prune old data before checkpoint
+wal.prune_before_checkpoint(b"snapshot_v1")?;
 ```
 
 ## Documentation

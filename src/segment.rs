@@ -15,7 +15,7 @@ use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 /// Represents the physical location and metadata of a frame on disk.
 /// Used to decouple the "Scan" phase from the "Fetch" phase.
 #[derive(Debug, Clone)]
-pub struct FrameLocation {
+pub(crate) struct FrameLocation {
   pub offset: u64,
   pub header: FrameHeader,
 }
@@ -29,7 +29,7 @@ struct InnerSegment {
 
 /// Represents an active segment file opened for WRITING.
 /// Uses internal mutability to allow concurrent access via Arc (cached).
-pub struct ActiveSegment {
+pub(crate) struct ActiveSegment {
   path: PathBuf,
   // The internal state is protected to allow usage via Arc from the Cache
   inner: Mutex<InnerSegment>,
@@ -189,7 +189,7 @@ impl ActiveSegment {
 }
 
 /// Represents a segment opened for READING.
-pub enum SegmentReader {
+pub(crate) enum SegmentReader {
   Io(BufReader<File>),
   Mmap(Mmap, usize), // Added usize to track cursor position
 }

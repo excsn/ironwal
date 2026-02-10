@@ -42,6 +42,10 @@ mod state;
 mod util;
 mod wal;
 
+// Sharded WAL extension (optional feature)
+#[cfg(feature = "sharded")]
+pub mod sharded;
+
 // Re-exports for the flat public API
 pub use batch::TxnWriter;
 pub use config::{CompressionType, CorruptionPolicy, ReadStrategy, SyncMode, WalOptions};

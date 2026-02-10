@@ -58,6 +58,13 @@ impl WalIterator {
 
     let idx_path = stream_dir.join(SegmentIndex::FILENAME);
 
+    // If index doesn't exist, the stream has no data yet
+    if !idx_path.exists() {
+      self.reader = None;
+      self.current_segment_start_id = None;
+      return Ok(());
+    }
+
     // Load Index
     let index = self.wal.get_or_load_index(&stream_dir, &idx_path)?;
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 ///
 /// Internally uses a sharded locking strategy (via RwLock) to allow
 /// concurrent access to different streams.
-pub struct StreamStateMap {
+pub(crate) struct StreamStateMap {
   // Map StreamKey -> Protected State
   inner: RwLock<HashMap<String, Arc<Mutex<StreamState>>>>,
 }

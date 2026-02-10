@@ -94,6 +94,125 @@ Iterator for sequential reads. Implements `Iterator<Item = Result<Vec<u8>>>`.
 **Methods:**
 *   (Standard Iterator methods like `next()`).
 
+## 4. Sharded WAL (Optional Feature)
+
+Enable with `features = ["sharded"]` in `Cargo.toml`.
+
+### `struct ShardedWal`
+A horizontal sharding wrapper around `Wal` with consistent checkpointing.
+
+**Construction:**
+*   `pub fn new(opts: WalOptions, shard_count: u16) -> Result<Self>`
+    *   Creates a sharded WAL with `shard_count` independent shards.
+    *   `shard_count` must be > 0 and is fixed for the lifetime of the WAL.
+
+**Write Operations:**
+*   `pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(u16, u64)>`
+    *   Appends `value` to the shard determined by `hash(key) % shard_count`.
+    *   Returns `(shard_id, sequence_id)`.
+*   `pub fn append_batch(&self, entries: &[(Vec<u8>, Vec<u8>)]) -> Result<Vec<(u16, u64)>>`
+    *   Appends multiple entries, automatically grouped by shard.
+    *   **Not atomic across shards** - each shard commits independently.
+    *   Returns results in same order as input.
+*   `pub fn append_batch_for_key(&self, key: &[u8], values: &[&[u8]]) -> Result<Vec<(u16, u64)>>`
+    *   Appends a batch of values for a single key.
+    *   Optimized version of `append_batch` that avoids repeated hashing.
+    *   Returns vector of `(shard_id, sequence_id)`.
+
+**Checkpoint Operations:**
+*   `pub fn create_checkpoint(&self, user_id: &[u8]) -> Result<()>`
+    *   Creates a consistent snapshot of all shard offsets.
+    *   `user_id` is a user-defined identifier (e.g., Raft index, transaction ID).
+    *   Must be non-empty and ≤ 65535 bytes.
+*   `pub fn load_checkpoint(&self, user_id: &[u8]) -> Result<CheckpointData>`
+    *   Loads a specific checkpoint by its user-defined ID.
+*   `pub fn load_latest_checkpoint(&self) -> Result<(Vec<u8>, CheckpointData)>`
+    *   Loads the most recent checkpoint.
+    *   Returns `(user_id, checkpoint_data)`.
+
+**Read Operations:**
+*   `pub fn iter_shard(&self, shard_id: u16, start_offset: u64) -> Result<WalIterator>`
+    *   Returns an iterator for a specific shard starting at `start_offset`.
+    *   This is the primary way to read data from a sharded WAL.
+
+**Maintenance:**
+*   `pub fn prune_before_checkpoint(&self, user_id: &[u8]) -> Result<PruneStats>`
+    *   Deletes segments from all shards containing data before the checkpoint.
+    *   Returns statistics about pruned segments.
+*   `pub fn compact_checkpoints(&self, keep_latest_n: usize) -> Result<CompactionStats>`
+    *   Compacts the checkpoint log, keeping only the `keep_latest_n` most recent.
+
+**Accessors:**
+*   `pub fn shard_count(&self) -> u16`
+    *   Returns the number of shards.
+*   `pub fn checkpoint_count(&self) -> usize`
+    *   Returns the total number of checkpoints stored.
+*   `pub fn inner(&self) -> &Wal`
+    *   Returns a reference to the underlying `Wal` for advanced use cases.
+
+### `struct CheckpointData`
+Data returned when loading a checkpoint.
+
+**Fields:**
+*   `pub offsets: Vec<u64>` - Durable offset for each shard (indexed by shard_id).
+*   `pub timestamp: u64` - Unix timestamp (nanoseconds) when checkpoint was created.
+*   `pub shard_count: u16` - Number of shards (for validation).
+
+### `struct PruneStats`
+Statistics from a pruning operation.
+
+**Fields:**
+*   `pub shards_pruned: u16` - Number of shards that had segments deleted.
+*   `pub segments_deleted: usize` - Total segments deleted across all shards.
+
+### `struct CompactionStats`
+Statistics from checkpoint log compaction.
+
+**Fields:**
+*   `pub checkpoints_before: usize` - Checkpoint count before compaction.
+*   `pub checkpoints_after: usize` - Checkpoint count after compaction.
+*   `pub bytes_reclaimed: u64` - Bytes freed from the checkpoint log.
+
+### Error Variants (Sharded)
+
+Additional error variants when using the `sharded` feature:
+
+*   `CheckpointNotFound(String)`: Requested checkpoint does not exist.
+*   `CheckpointCorrupted { offset: u64, reason: String }`: Checkpoint data is invalid.
+*   `ShardCountMismatch { expected: u16, found: u16 }`: Checkpoint shard count differs from current configuration.
+*   `InvalidCheckpointId(String)`: User-provided checkpoint ID is invalid (empty or too long).
+*   `NoCheckpoints`: Attempted to load latest checkpoint when none exist.
+
+### Usage Pattern Example
+```rust
+use ironwal::sharded::ShardedWal;
+use ironwal::WalOptions;
+
+// Initialize
+let wal = ShardedWal::new(WalOptions::default(), 16)?;
+
+// Write data
+for i in 0..1000 {
+    let key = format!("user_{}", i);
+    wal.append(key.as_bytes(), b"data")?;
+}
+
+// Create checkpoint
+wal.create_checkpoint(b"snapshot_1")?;
+
+// Restore from checkpoint
+let (id, checkpoint) = wal.load_latest_checkpoint()?;
+for shard_id in 0..16 {
+    let offset = checkpoint.offsets[shard_id as usize];
+    let mut iter = wal.iter_shard(shard_id, offset)?;
+    // Process entries...
+}
+
+// Cleanup
+wal.prune_before_checkpoint(b"snapshot_1")?;
+wal.compact_checkpoints(5)?;
+```
+
 ## 9. Error Handling
 
 ### `enum Error`
