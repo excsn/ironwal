@@ -274,6 +274,13 @@ impl ShardedWal {
     self.checkpoint_manager.load_latest()
   }
 
+  /// Lists all checkpoints, sorted by timestamp (oldest to newest).
+  ///
+  /// Returns a vector of `(user_id, timestamp)` tuples.
+  pub fn list_checkpoints(&self) -> Vec<(Vec<u8>, u64)> {
+    self.checkpoint_manager.list_checkpoints()
+  }
+
   /// Returns an iterator for a specific shard starting at the given offset.
   /// This is the primary way to read data from a sharded WAL.
   ///
@@ -432,6 +439,20 @@ mod tests {
     // Load it back
     let data = wal.load_checkpoint(b"checkpoint_1").unwrap();
     assert_eq!(data.offsets.len(), 4);
+  }
+
+  #[test]
+  fn test_list_checkpoints() {
+    let (wal, _dir) = test_env(4);
+
+    wal.create_checkpoint(b"ckpt_1").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    wal.create_checkpoint(b"ckpt_2").unwrap();
+
+    let list = wal.list_checkpoints();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].0, b"ckpt_1");
+    assert_eq!(list[1].0, b"ckpt_2");
   }
 
   #[test]

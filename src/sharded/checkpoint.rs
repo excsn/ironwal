@@ -236,6 +236,17 @@ impl CheckpointManager {
     }
   }
 
+  /// Lists all checkpoints, sorted by timestamp (oldest to newest).
+  ///
+  /// Returns a vector of `(user_id, timestamp)` tuples.
+  pub fn list_checkpoints(&self) -> Vec<(Vec<u8>, u64)> {
+    self.index
+      .all_sorted_by_time()
+      .into_iter()
+      .map(|(id, meta)| (id, meta.timestamp))
+      .collect()
+  }
+
   /// Compacts the checkpoint log, keeping only the N most recent checkpoints.
   ///
   /// # Steps
@@ -363,6 +374,22 @@ mod tests {
     let (user_id, data) = manager.load_latest().unwrap();
     assert_eq!(user_id, b"ckpt_2");
     assert_eq!(data.offsets, vec![30, 40]);
+  }
+
+  #[test]
+  fn test_list_checkpoints() {
+    let dir = TempDir::new().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf(), 1).unwrap();
+
+    manager.create(b"ckpt_1", vec![10]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    manager.create(b"ckpt_2", vec![20]).unwrap();
+
+    let list = manager.list_checkpoints();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].0, b"ckpt_1");
+    assert_eq!(list[1].0, b"ckpt_2");
+    assert!(list[0].1 < list[1].1);
   }
 
   #[test]

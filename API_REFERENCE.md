@@ -129,6 +129,9 @@ A horizontal sharding wrapper around `Wal` with consistent checkpointing.
 *   `pub fn load_latest_checkpoint(&self) -> Result<(Vec<u8>, CheckpointData)>`
     *   Loads the most recent checkpoint.
     *   Returns `(user_id, checkpoint_data)`.
+*   `pub fn list_checkpoints(&self) -> Vec<(Vec<u8>, u64)>`
+    *   Lists all checkpoints, sorted by timestamp (oldest to newest).
+    *   Returns a vector of `(user_id, timestamp)` tuples.
 
 **Read Operations:**
 *   `pub fn iter_shard(&self, shard_id: u16, start_offset: u64) -> Result<WalIterator>`
