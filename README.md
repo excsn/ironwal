@@ -38,6 +38,9 @@ Enable with the `sharded` feature:
 [dependencies]
 ironwal = { version = "0.6.0", features = ["sharded"] }
 ```
+## Notable Users
+
+[Hi Stakes Markets Game](https://www.histakesgame.com) -  The worlds most advanced financial simulator, available on iPhone and Android.
 
 ## Installation
 
