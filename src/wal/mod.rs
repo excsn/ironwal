@@ -220,10 +220,13 @@ impl WalState {
       }
     }
 
+    let segment = self.get_or_create_segment(stream, state)?;
     if self.options.sync_mode == SyncMode::Strict || self.options.sync_mode == SyncMode::BatchOnly {
-      // Get the final segment that was written to and flush it.
-      let segment = self.get_or_create_segment(stream, state)?;
       segment.flush()?;
+    } else {
+      // For Async mode, flush the userspace BufWriter to the OS kernel so that
+      // subsequent reads on new file descriptors can immediately see the data.
+      segment.flush_buffer()?;
     }
 
     Ok(overall_start_id..state.next_id)

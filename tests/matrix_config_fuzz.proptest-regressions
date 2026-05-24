@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 134e44260ef87cafa3955de75d2fc63af2fa0de07752243dac6ae832dba2edad # shrinks to (sync_mode, read_strategy, compression, max_seg_size, max_entries) = (Async, StandardIo, None, 64, 1), actions = [AppendBatch { stream_id: 0, batch: [[]] }]
