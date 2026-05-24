@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::config::{CompressionType, ReadStrategy, WalOptions};
 use crate::error::{Error, Result};
@@ -208,6 +209,14 @@ impl SegmentReader {
     Ok(SegmentReader::Io(reader))
   }
 
+  /// Opens a segment file using StandardIo regardless of the configured `read_strategy`.
+  /// Used to create transient handles for the active segment, which must never be
+  /// memory-mapped (growing file bounds cause SIGBUS / stale-EOF risk).
+  pub fn open_io(path: &Path, read_buffer_size: usize) -> Result<Self> {
+    let file = File::open(path)?;
+    Ok(SegmentReader::Io(BufReader::with_capacity(read_buffer_size, file)))
+  }
+
   /// Reads the NEXT batch from the current cursor position.
   /// Returns the Header AND the payload so the iterator knows the ID range.
   pub fn next_batch(&mut self) -> Result<Option<(FrameHeader, Vec<Vec<u8>>)>> {
@@ -238,7 +247,7 @@ impl SegmentReader {
           });
         }
 
-        let final_data = Self::decompress(header.frame_type, &payload, header.uncompressed_size)?;
+        let final_data = decompress(header.frame_type, &payload, header.uncompressed_size)?;
         Ok(Some((header, deserialize_batch(&final_data)?)))
       }
       Self::Mmap(mmap, cursor) => {
@@ -269,7 +278,7 @@ impl SegmentReader {
         // Advance cursor so the next call reads the next frame
         *cursor = payload_end;
 
-        let final_data = Self::decompress(header.frame_type, payload, header.uncompressed_size)?;
+        let final_data = decompress(header.frame_type, payload, header.uncompressed_size)?;
         Ok(Some((header, deserialize_batch(&final_data)?)))
       }
     }
@@ -468,7 +477,7 @@ impl SegmentReader {
           });
         }
 
-        let final_data = Self::decompress(loc.header.frame_type, &payload, loc.header.uncompressed_size)?;
+        let final_data = decompress(loc.header.frame_type, &payload, loc.header.uncompressed_size)?;
         Ok(deserialize_batch(&final_data)?)
       }
       Self::Mmap(mmap, _) => {
@@ -493,27 +502,215 @@ impl SegmentReader {
           });
         }
 
-        let final_data = Self::decompress(loc.header.frame_type, payload, loc.header.uncompressed_size)?;
+        let final_data = decompress(loc.header.frame_type, payload, loc.header.uncompressed_size)?;
         Ok(deserialize_batch(&final_data)?)
       }
     }
   }
 
-  fn decompress(ft: FrameType, data: &[u8], _size: u32) -> Result<std::borrow::Cow<'_, [u8]>> {
-    match ft {
-      FrameType::Raw => Ok(std::borrow::Cow::Borrowed(data)),
-      FrameType::Lz4 => {
-        #[cfg(feature = "compression")]
-        {
-          let mut decoder = FrameDecoder::new(data);
-          let mut out = Vec::with_capacity(_size as usize);
-          decoder.read_to_end(&mut out).map_err(Error::Io)?;
-          Ok(std::borrow::Cow::Owned(out))
+}
+
+/// Decompresses a frame payload according to its `FrameType`.
+/// Extracted as a free function so both `SegmentReader` and `CachedReadDescriptor` can reuse it.
+pub(crate) fn decompress(ft: FrameType, data: &[u8], _size: u32) -> Result<std::borrow::Cow<'_, [u8]>> {
+  match ft {
+    FrameType::Raw => Ok(std::borrow::Cow::Borrowed(data)),
+    FrameType::Lz4 => {
+      #[cfg(feature = "compression")]
+      {
+        let mut decoder = FrameDecoder::new(data);
+        let mut out = Vec::with_capacity(_size as usize);
+        decoder.read_to_end(&mut out).map_err(Error::Io)?;
+        Ok(std::borrow::Cow::Owned(out))
+      }
+      #[cfg(not(feature = "compression"))]
+      {
+        Err(Error::Config("LZ4 frame found but compression feature disabled".into()))
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stateless positional read helper (platform-conditional)
+// ---------------------------------------------------------------------------
+
+/// Reads exactly `buf.len()` bytes from `file` starting at `offset` without
+/// moving the file's shared cursor, making it safe to call concurrently.
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::FileExt;
+    let mut pos = 0usize;
+    while pos < buf.len() {
+      match file.read_at(&mut buf[pos..], offset + pos as u64) {
+        Ok(0) => {
+          return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "pread returned 0"));
         }
-        #[cfg(not(feature = "compression"))]
-        {
-          Err(Error::Config("LZ4 frame found but compression feature disabled".into()))
+        Ok(n) => pos += n,
+        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+        Err(e) => return Err(e),
+      }
+    }
+    Ok(())
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::fs::FileExt;
+    let mut pos = 0usize;
+    while pos < buf.len() {
+      match file.seek_read(&mut buf[pos..], offset + pos as u64) {
+        Ok(0) => {
+          return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "seek_read returned 0"));
         }
+        Ok(n) => pos += n,
+        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+        Err(e) => return Err(e),
+      }
+    }
+    Ok(())
+  }
+  #[cfg(not(any(unix, windows)))]
+  {
+    let _ = (file, buf, offset);
+    Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "stateless positional reads are not supported on this platform",
+    ))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CachedReadDescriptor
+// ---------------------------------------------------------------------------
+
+/// A stateless, cloneable read handle for an immutable (rotated) segment file.
+///
+/// Both variants support concurrent access from multiple threads without a
+/// shared mutex: `Io` uses platform pread-style APIs (no shared cursor),
+/// `Mmap` does lock-free slice indexing into a read-only mapping.
+///
+/// Only rotated segments are stored here. The active segment is always opened
+/// with a fresh transient `SegmentReader::open_io` handle to avoid SIGBUS
+/// and stale-EOF risks from a growing file.
+pub(crate) enum CachedReadDescriptor {
+  /// Standard-IO path: `Arc<File>` shared across threads; each read computes
+  /// its own offset via `read_exact_at`.
+  Io(Arc<File>),
+  /// Mmap path: the file is mapped once; concurrent slice reads are inherently safe.
+  Mmap(Arc<Mmap>),
+}
+
+impl CachedReadDescriptor {
+  pub fn open(path: &Path, options: &WalOptions) -> Result<Self> {
+    let file = File::open(path)?;
+    if options.read_strategy == ReadStrategy::Mmap {
+      // Safety: rotated segments are immutable; the mapping will not be
+      // invalidated by concurrent writes.
+      let mmap = unsafe { Mmap::map(&file)? };
+      return Ok(Self::Mmap(Arc::new(mmap)));
+    }
+    Ok(Self::Io(Arc::new(file)))
+  }
+
+  /// Scans frame headers at sequential pread offsets to find the frame
+  /// containing `target_id`.  Entirely stateless — safe to call concurrently
+  /// on the same descriptor instance.
+  pub fn find_frame(&self, target_id: u64) -> Result<Option<FrameLocation>> {
+    match self {
+      Self::Io(file) => {
+        let mut offset = 0u64;
+        let mut hbuf = [0u8; FrameHeader::SIZE];
+        loop {
+          match read_exact_at(file, &mut hbuf, offset) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(Error::Io(e)),
+          }
+          let mut slice = &hbuf[..];
+          let header = match FrameHeader::read(&mut slice) {
+            Ok(h) => h,
+            // Corrupt or zero magic at this offset means we have reached the
+            // end of valid data (or the file is corrupt).
+            Err(_) => return Ok(None),
+          };
+          let end_id = header.start_id + header.entry_count as u64;
+          if target_id >= header.start_id && target_id < end_id {
+            return Ok(Some(FrameLocation { offset, header }));
+          }
+          offset += FrameHeader::SIZE as u64 + header.disk_size as u64;
+        }
+      }
+      Self::Mmap(mmap) => {
+        let data: &[u8] = mmap;
+        let len = data.len();
+        let mut cursor = 0usize;
+        while cursor + FrameHeader::SIZE <= len {
+          let mut slice = &data[cursor..];
+          let header = match FrameHeader::read(&mut slice) {
+            Ok(h) => h,
+            Err(_) => return Ok(None),
+          };
+          let end_id = header.start_id + header.entry_count as u64;
+          if target_id >= header.start_id && target_id < end_id {
+            return Ok(Some(FrameLocation { offset: cursor as u64, header }));
+          }
+          cursor += FrameHeader::SIZE + header.disk_size as usize;
+        }
+        Ok(None)
+      }
+    }
+  }
+
+  /// Reads, CRC-validates, and decompresses the payload identified by `loc`.
+  /// Entirely stateless — safe to call concurrently on the same descriptor instance.
+  pub fn read_frame(&self, loc: &FrameLocation) -> Result<Vec<Vec<u8>>> {
+    match self {
+      Self::Io(file) => {
+        let payload_offset = loc.offset + FrameHeader::SIZE as u64;
+        let mut payload = vec![0u8; loc.header.disk_size as usize];
+        read_exact_at(file, &mut payload, payload_offset).map_err(Error::Io)?;
+
+        let calc_crc = calculate_checksum(
+          loc.header.start_id,
+          loc.header.entry_count,
+          loc.header.frame_type,
+          &payload,
+        );
+        if calc_crc != loc.header.crc {
+          return Err(Error::CrcMismatch {
+            expected: loc.header.crc,
+            actual: calc_crc,
+            offset: loc.offset,
+          });
+        }
+        let final_data = decompress(loc.header.frame_type, &payload, loc.header.uncompressed_size)?;
+        Ok(deserialize_batch(&final_data)?)
+      }
+      Self::Mmap(mmap) => {
+        let data: &[u8] = mmap;
+        let start = loc.offset as usize + FrameHeader::SIZE;
+        let end = start + loc.header.disk_size as usize;
+        if end > data.len() {
+          return Err(Error::Corruption("Frame payload truncated in mmap".into()));
+        }
+        let payload = &data[start..end];
+
+        let calc_crc = calculate_checksum(
+          loc.header.start_id,
+          loc.header.entry_count,
+          loc.header.frame_type,
+          payload,
+        );
+        if calc_crc != loc.header.crc {
+          return Err(Error::CrcMismatch {
+            expected: loc.header.crc,
+            actual: calc_crc,
+            offset: loc.offset,
+          });
+        }
+        let final_data = decompress(loc.header.frame_type, payload, loc.header.uncompressed_size)?;
+        Ok(deserialize_batch(&final_data)?)
       }
     }
   }

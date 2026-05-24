@@ -76,6 +76,12 @@ pub struct WalOptions {
   /// Default: 50.
   pub max_open_segments: usize,
 
+  /// Maximum number of file descriptors to keep open for reading rotated
+  /// (immutable) segments. Active segments always use a transient handle
+  /// and are not counted against this limit.
+  /// Default: 128.
+  pub max_open_read_segments: usize,
+
   /// Size of the in-memory write buffer before flushing to the OS kernel.
   /// Default: 64 KB.
   pub write_buffer_size: usize,
@@ -108,6 +114,7 @@ impl Default for WalOptions {
       max_segment_size: 64 * 1024 * 1024, // 64 MB
       max_entries_per_segment: u64::MAX,
       max_open_segments: 128,
+      max_open_read_segments: 128,
       write_buffer_size: 64 * 1024, // 64 KB
       read_buffer_size: 128 * 1024, // 128 KB
       block_cache_size: None,

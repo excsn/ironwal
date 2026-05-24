@@ -72,6 +72,9 @@ name = "compression"
 required-features = ["compression"]
 
 [[test]]
+name = "read_descriptor_cache"
+
+[[test]]
 name = "sharded_basic"
 path = "tests/sharded/basic.rs"
 required-features = ["sharded"]

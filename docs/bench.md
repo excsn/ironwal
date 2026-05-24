@@ -8,19 +8,19 @@
 
 ### `Append_Operations/append_single_strict`
 
-* **Time:** 9.2916 ms - 9.3838 ms - 9.4737 ms
+* **Time:** 10.541 ms - 10.638 ms - 10.741 ms
 
 ### `Append_Operations/append_single_async`
 
-* **Time:** 5.7344 ms - 5.8385 ms - 5.9435 ms
+* **Time:** 6.3475 ms - 6.4548 ms - 6.5647 ms
 
 ### `Append_Operations/append_batch_100_strict`
 
-* **Time:** 9.6809 ms - 9.8025 ms - 9.9255 ms
+* **Time:** 10.784 ms - 10.895 ms - 11.004 ms
 
 ### `Append_Operations/append_batch_100_async`
 
-* **Time:** 5.5162 ms - 5.6068 ms - 5.7006 ms
+* **Time:** 6.4485 ms - 6.5493 ms - 6.6518 ms
 
 ---
 
@@ -28,23 +28,23 @@
 
 ### `Read_Operations/read_random_get_std_io`
 
-* **Time:** 18.455 ms - 20.849 ms - 23.289 ms
+* **Time:** 14.054 ms - 15.932 ms - 17.840 ms
 
 ### `Read_Operations/read_random_get_mmap`
 
-* **Time:** 457.40 µs - 472.04 µs - 487.03 µs
+* **Time:** 236.08 µs - 245.23 µs - 255.03 µs
 
 ### `Read_Operations/read_random_get_mmap_cached`
 
-* **Time:** 306.53 µs - 393.77 µs - 526.52 µs
+* **Time:** 367.69 µs - 416.65 µs - 475.42 µs
 
 ### `Read_Operations/read_sequential_iter_std_io`
 
-* **Time:** 1.3844 ms - 1.4165 ms - 1.4548 ms
+* **Time:** 1.1298 ms - 1.1361 ms - 1.1428 ms
 
 ### `Read_Operations/read_sequential_iter_mmap`
 
-* **Time:** 1.0685 ms - 1.0769 ms - 1.0859 ms
+* **Time:** 926.83 µs - 933.70 µs - 941.30 µs
 
 ---
 
@@ -52,7 +52,7 @@
 
 ### `Stress/CacheThrashing/write_round_robin_thrashing`
 
-* **Time:** 572.84 ms - 577.56 ms - 582.23 ms
+* **Time:** 532.00 ms - 535.29 ms - 538.57 ms
 
 ---
 
@@ -60,23 +60,23 @@
 
 ### `Stress/Concurrency/1`
 
-* **Time:** 7.4704 ms - 7.6078 ms - 7.7438 ms
-* **Throughput:** 12.913 Kelem/s - 13.144 Kelem/s - 13.386 Kelem/s
+* **Time:** 7.2361 ms - 7.3698 ms - 7.5040 ms
+* **Throughput:** 13.326 Kelem/s - 13.569 Kelem/s - 13.820 Kelem/s
 
 ### `Stress/Concurrency/4`
 
-* **Time:** 16.943 ms - 17.418 ms - 17.897 ms
-* **Throughput:** 22.351 Kelem/s - 22.965 Kelem/s - 23.608 Kelem/s
+* **Time:** 15.557 ms - 15.911 ms - 16.259 ms
+* **Throughput:** 24.602 Kelem/s - 25.139 Kelem/s - 25.711 Kelem/s
 
 ### `Stress/Concurrency/8`
 
-* **Time:** 28.291 ms - 28.964 ms - 29.632 ms
-* **Throughput:** 26.998 Kelem/s - 27.621 Kelem/s - 28.278 Kelem/s
+* **Time:** 27.230 ms - 27.927 ms - 28.645 ms
+* **Throughput:** 27.928 Kelem/s - 28.646 Kelem/s - 29.380 Kelem/s
 
 ### `Stress/Concurrency/16`
 
-* **Time:** 53.700 ms - 55.451 ms - 57.228 ms
-* **Throughput:** 27.958 Kelem/s - 28.854 Kelem/s - 29.795 Kelem/s
+* **Time:** 49.170 ms - 50.903 ms - 52.670 ms
+* **Throughput:** 30.378 Kelem/s - 31.432 Kelem/s - 32.540 Kelem/s
 
 ---
 
@@ -84,7 +84,7 @@
 
 ### `Stress/Recovery/recover_10k_entries_1k_segments`
 
-* **Time:** 710.93 µs - 712.50 µs - 714.21 µs
+* **Time:** 923.94 µs - 925.86 µs - 927.94 µs
 
 ---
 

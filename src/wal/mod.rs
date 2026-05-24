@@ -16,7 +16,7 @@ use crate::batch::TxnWriter;
 use crate::config::{SyncMode, WalOptions};
 use crate::error::{Error, Result};
 use crate::index::{self, SegmentIndex};
-use crate::segment::{ActiveSegment, SegmentReader};
+use crate::segment::{ActiveSegment, CachedReadDescriptor, SegmentReader};
 use crate::state::{StreamState, StreamStateFile};
 use crate::util::{self, segment_filename};
 use crate::wal::stream_map::StreamStateMap;
@@ -49,6 +49,13 @@ pub struct WalState {
   /// Cache for READ blocks (decompressed frames).
   /// Maps (Stream, File, Offset) -> Decompressed Batch
   read_cache: Option<Cache<BlockCacheKey, Vec<Vec<u8>>>>,
+
+  /// Cache of open file descriptors for READING rotated (immutable) segments.
+  /// Active segments are always bypassed and use a transient handle instead.
+  /// Under high read concurrency, multiple threads may race to insert the same
+  /// entry; this is intentionally benign — both opens are read-only and the
+  /// last writer simply overwrites with an equivalent descriptor.
+  read_descriptor_cache: Cache<PathBuf, CachedReadDescriptor>,
 }
 
 impl WalState {
@@ -295,6 +302,13 @@ impl Wal {
       None
     };
 
+    let read_descriptor_cache = CacheBuilder::new()
+      .shards(4)
+      .capacity(options.max_open_read_segments as u64)
+      .cache_policy_factory(|| Box::new(LruPolicy::new()))
+      .build()
+      .map_err(|e| Error::Config(format!("Failed to build read descriptor cache: {}", e)))?;
+
     // 2. Scan and recover state from filesystem
     let streams_map = Self::recover_all_streams(&options, &index_cache)?;
     let streams = StreamStateMap::new(streams_map);
@@ -302,12 +316,29 @@ impl Wal {
     Ok(Self {
       inner: Arc::new(WalState {
         options,
-        streams, // Replaces state_lock: Mutex::new(state)
+        streams,
         index_cache,
         write_cache,
         read_cache,
+        read_descriptor_cache,
       }),
     })
+  }
+
+  /// Returns a cached `CachedReadDescriptor` for a rotated segment, opening the
+  /// file if the cache does not already hold it.
+  ///
+  /// Under concurrent read pressure, multiple threads may race on a cold path
+  /// and each open the file independently before the first insert completes.
+  /// This is intentionally benign: the segment is read-only and the last
+  /// insert simply replaces an equivalent descriptor.
+  fn get_or_load_read_descriptor(&self, path: &PathBuf) -> Result<Arc<CachedReadDescriptor>> {
+    if let Some(d) = self.inner.read_descriptor_cache.fetch(path) {
+      return Ok(d);
+    }
+    let desc = CachedReadDescriptor::open(path, &self.inner.options)?;
+    self.inner.read_descriptor_cache.insert(path.clone(), desc, 1);
+    Ok(self.inner.read_descriptor_cache.fetch(path).unwrap())
   }
 
   /// Returns the Start ID of the currently active segment.
@@ -509,23 +540,18 @@ impl Wal {
   pub fn get(&self, stream: &str, id: u64) -> Result<Option<Vec<u8>>> {
     let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
 
-    // 1. Find which segment file contains this ID
-    // We use the index cache to avoid disk IO on segments.idx
+    // 1. Locate the segment that contains this ID via the index cache.
     let index = {
       let idx_path = stream_dir.join(SegmentIndex::FILENAME);
-      // We must ensure the index is loaded. The `recover_stream` step ensures this on startup.
-      // In a real system we might need retry/reload logic here if it was evicted.
       if let Some(idx) = self.inner.index_cache.fetch(&idx_path) {
         idx
       } else {
-        // Fallback: Try to open it and cache it
         let idx = SegmentIndex::open(&stream_dir)?;
         self.inner.index_cache.insert(idx_path.clone(), idx, 1);
         self.inner.index_cache.fetch(&idx_path).unwrap()
       }
     };
 
-    // Find the file that starts *before* or *at* our ID
     let segment_start_id = index.find_segment_start_id(id)?;
     let segment_path = stream_dir.join(segment_filename(segment_start_id));
 
@@ -533,73 +559,96 @@ impl Wal {
       return Ok(None);
     }
 
-    // 2. Open the segment reader
-    let mut reader = SegmentReader::open(&segment_path, &self.inner.options)?;
-
-    // 3. Scan headers to find the specific frame
-    // This is cheap (no decompression)
-    let frame_loc = match reader.find_frame(id)? {
-      Some(loc) => loc,
-      None => return Ok(None),
-    };
-
-    // 4. Construct Cache Key
+    // 2. Compute stream hash once (used for the block cache key in both paths).
     let mut hasher = DefaultHasher::new();
     stream.hash(&mut hasher);
     let stream_hash = hasher.finish();
 
-    let cache_key = BlockCacheKey {
-      stream_hash,
-      segment_start_id,
-      frame_offset: frame_loc.offset,
-    };
+    // 3. Determine whether the target segment is still being actively written to.
+    //    Active segments bypass the read descriptor cache to avoid SIGBUS and
+    //    stale-EOF risks from a file that is currently growing.
+    //    A rotation that occurs between this check and the read is safe: the file
+    //    simply stops growing, so opening it as "active" is still correct.
+    let is_active = self.inner.streams
+      .get(stream)
+      .map_or(false, |lock| lock.lock().active_segment_start_id == segment_start_id);
 
-    // 5. Check Cache
-    if let Some(read_cache) = &self.inner.read_cache {
-      if let Some(batch) = read_cache.fetch(&cache_key) {
-        // Hit! Extract item from batch
-        // Calculate index within the batch
-        let index_in_batch = (id - frame_loc.header.start_id) as usize;
-        if index_in_batch < batch.len() {
-          return Ok(Some(batch[index_in_batch].clone()));
-        } else {
-          return Err(Error::Corruption(
-            "Found frame but ID offset exceeds batch length".into(),
-          ));
+    if is_active {
+      // Transient handle respecting the configured ReadStrategy — bypasses the
+      // persistent descriptor cache. Safe for mmap: file only grows, reader
+      // bounds-checks against the snapshot length, SIGBUS is impossible.
+      let mut reader = SegmentReader::open(&segment_path, &self.inner.options)?;
+
+      let frame_loc = match reader.find_frame(id)? {
+        Some(loc) => loc,
+        None => return Ok(None),
+      };
+
+      let cache_key = BlockCacheKey { stream_hash, segment_start_id, frame_offset: frame_loc.offset };
+
+      if let Some(read_cache) = &self.inner.read_cache {
+        if let Some(batch) = read_cache.fetch(&cache_key) {
+          let idx = (id - frame_loc.header.start_id) as usize;
+          return if idx < batch.len() {
+            Ok(Some(batch[idx].clone()))
+          } else {
+            Err(Error::Corruption("Found frame but ID offset exceeds batch length".into()))
+          };
         }
       }
-    }
 
-    // 6. Miss (or no cache): Read, Decompress, Cache
-    let batch = match reader.read_at(&frame_loc) {
-      Ok(b) => b,
-      Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-        // We found a header, but the payload was truncated.
-        // This implies a partial write at the end of the log (e.g., power loss).
-        // We treat this as "record not found" to allow recovery.
-        return Ok(None);
+      let batch = match reader.read_at(&frame_loc) {
+        Ok(b) => b,
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+      };
+
+      let idx = (id - frame_loc.header.start_id) as usize;
+      if idx >= batch.len() {
+        return Err(Error::Corruption("Found frame but ID offset exceeds batch length".into()));
       }
-      Err(e) => return Err(e),
-    };
+      let result = batch[idx].clone();
+      if let Some(read_cache) = &self.inner.read_cache {
+        let weight = batch.iter().map(|v| v.len() as u64).sum::<u64>();
+        read_cache.insert(cache_key, batch, weight.max(1));
+      }
+      Ok(Some(result))
 
-    // Validate bounds again
-    let index_in_batch = (id - frame_loc.header.start_id) as usize;
-    if index_in_batch >= batch.len() {
-      return Err(Error::Corruption(
-        "Found frame but ID offset exceeds batch length".into(),
-      ));
+    } else {
+      // Rotated (immutable) segment — use (or populate) the read descriptor cache.
+      let desc = self.get_or_load_read_descriptor(&segment_path)?;
+
+      let frame_loc = match desc.find_frame(id)? {
+        Some(loc) => loc,
+        None => return Ok(None),
+      };
+
+      let cache_key = BlockCacheKey { stream_hash, segment_start_id, frame_offset: frame_loc.offset };
+
+      if let Some(read_cache) = &self.inner.read_cache {
+        if let Some(batch) = read_cache.fetch(&cache_key) {
+          let idx = (id - frame_loc.header.start_id) as usize;
+          return if idx < batch.len() {
+            Ok(Some(batch[idx].clone()))
+          } else {
+            Err(Error::Corruption("Found frame but ID offset exceeds batch length".into()))
+          };
+        }
+      }
+
+      let batch = desc.read_frame(&frame_loc)?;
+
+      let idx = (id - frame_loc.header.start_id) as usize;
+      if idx >= batch.len() {
+        return Err(Error::Corruption("Found frame but ID offset exceeds batch length".into()));
+      }
+      let result = batch[idx].clone();
+      if let Some(read_cache) = &self.inner.read_cache {
+        let weight = batch.iter().map(|v| v.len() as u64).sum::<u64>();
+        read_cache.insert(cache_key, batch, weight.max(1));
+      }
+      Ok(Some(result))
     }
-
-    let result = batch[index_in_batch].clone();
-
-    // Insert into cache
-    if let Some(read_cache) = &self.inner.read_cache {
-      // Weight is approximate (sum of data lengths)
-      let weight = batch.iter().map(|v| v.len() as u64).sum::<u64>();
-      read_cache.insert(cache_key, batch, weight.max(1));
-    }
-
-    Ok(Some(result))
   }
 
   /// Retrieves multiple entries by their IDs in a single operation.
@@ -613,7 +662,7 @@ impl Wal {
     let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
     let idx_path = stream_dir.join(SegmentIndex::FILENAME);
 
-    // Load index once
+    // Load index once.
     let index = if let Some(idx) = self.inner.index_cache.fetch(&idx_path) {
       idx
     } else {
@@ -622,62 +671,95 @@ impl Wal {
       self.inner.index_cache.fetch(&idx_path).unwrap()
     };
 
-    // Group IDs by segment
+    // Pre-compute stream hash (same for every entry in this call).
+    let mut hasher = DefaultHasher::new();
+    stream.hash(&mut hasher);
+    let stream_hash = hasher.finish();
+
+    // Obtain the active segment ID once.  A rotation that occurs mid-loop is
+    // safe: the reader opens an immutable file that simply stopped growing.
+    let active_seg_id: Option<u64> = self.inner.streams
+      .get(stream)
+      .map(|lock| lock.lock().active_segment_start_id);
+
+    // Group IDs by segment.
     let mut segment_groups: HashMap<u64, Vec<(usize, u64)>> = HashMap::new();
     for (idx, &id) in ids.iter().enumerate() {
       let segment_start_id = index.find_segment_start_id(id)?;
-      segment_groups
-        .entry(segment_start_id)
-        .or_default()
-        .push((idx, id));
+      segment_groups.entry(segment_start_id).or_default().push((idx, id));
     }
 
-    // Pre-allocate results
     let mut results = vec![None; ids.len()];
 
-    // Process each segment
     for (segment_start_id, group) in segment_groups {
       let segment_path = stream_dir.join(segment_filename(segment_start_id));
-
       if !segment_path.exists() {
         continue;
       }
 
-      let mut reader = SegmentReader::open(&segment_path, &self.inner.options)?;
+      let is_active = active_seg_id == Some(segment_start_id);
 
-      for (result_idx, id) in group {
-        let frame_loc = match reader.find_frame(id)? {
-          Some(loc) => loc,
-          None => continue,
-        };
+      if is_active {
+        // Transient handle respecting the configured ReadStrategy — bypasses
+        // the persistent descriptor cache. Mmap is safe here for the same
+        // reason as in get(): the file only grows, bounds are fixed at open time.
+        let mut reader = SegmentReader::open(&segment_path, &self.inner.options)?;
 
-        // Check cache
-        let mut hasher = DefaultHasher::new();
-        stream.hash(&mut hasher);
-        let stream_hash = hasher.finish();
+        for (result_idx, id) in group {
+          let frame_loc = match reader.find_frame(id)? {
+            Some(loc) => loc,
+            None => continue,
+          };
 
-        let cache_key = BlockCacheKey {
-          stream_hash,
-          segment_start_id,
-          frame_offset: frame_loc.offset,
-        };
+          let cache_key = BlockCacheKey { stream_hash, segment_start_id, frame_offset: frame_loc.offset };
 
-        let batch = if let Some(read_cache) = &self.inner.read_cache {
-          if let Some(cached_batch) = read_cache.fetch(&cache_key) {
-            cached_batch
+          let batch = if let Some(read_cache) = &self.inner.read_cache {
+            if let Some(cached) = read_cache.fetch(&cache_key) {
+              cached
+            } else {
+              let b = reader.read_at(&frame_loc)?;
+              let weight = b.iter().map(|v| v.len() as u64).sum::<u64>().max(1);
+              read_cache.insert(cache_key, b.clone(), weight);
+              Arc::new(b)
+            }
           } else {
-            let batch = reader.read_at(&frame_loc)?;
-            let weight = batch.iter().map(|v| v.len() as u64).sum::<u64>().max(1);
-            read_cache.insert(cache_key, batch.clone(), weight);
-            Arc::new(batch)
-          }
-        } else {
-          Arc::new(reader.read_at(&frame_loc)?)
-        };
+            Arc::new(reader.read_at(&frame_loc)?)
+          };
 
-        let index_in_batch = (id - frame_loc.header.start_id) as usize;
-        if index_in_batch < batch.len() {
-          results[result_idx] = Some(batch[index_in_batch].clone());
+          let idx_in_batch = (id - frame_loc.header.start_id) as usize;
+          if idx_in_batch < batch.len() {
+            results[result_idx] = Some(batch[idx_in_batch].clone());
+          }
+        }
+      } else {
+        // Cached descriptor shared across all IDs in this rotated segment group.
+        let desc = self.get_or_load_read_descriptor(&segment_path)?;
+
+        for (result_idx, id) in group {
+          let frame_loc = match desc.find_frame(id)? {
+            Some(loc) => loc,
+            None => continue,
+          };
+
+          let cache_key = BlockCacheKey { stream_hash, segment_start_id, frame_offset: frame_loc.offset };
+
+          let batch = if let Some(read_cache) = &self.inner.read_cache {
+            if let Some(cached) = read_cache.fetch(&cache_key) {
+              cached
+            } else {
+              let b = desc.read_frame(&frame_loc)?;
+              let weight = b.iter().map(|v| v.len() as u64).sum::<u64>().max(1);
+              read_cache.insert(cache_key, b.clone(), weight);
+              Arc::new(b)
+            }
+          } else {
+            Arc::new(desc.read_frame(&frame_loc)?)
+          };
+
+          let idx_in_batch = (id - frame_loc.header.start_id) as usize;
+          if idx_in_batch < batch.len() {
+            results[result_idx] = Some(batch[idx_in_batch].clone());
+          }
         }
       }
     }
@@ -740,6 +822,7 @@ impl Wal {
       let path = stream_dir.join(&filename);
 
       self.inner.write_cache.invalidate(&path);
+      self.inner.read_descriptor_cache.invalidate(&path);
 
       match fs::remove_file(&path) {
         Ok(_) => deleted_ids.push(start_id),
