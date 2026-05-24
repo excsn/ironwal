@@ -890,4 +890,19 @@ impl Wal {
       }
     }))
   }
+
+  /// Flushes the BufWriter and calls `fsync` on the active segment for `stream`.
+  /// No-op if the stream has no cached active segment (nothing written yet).
+  pub(crate) fn sync_stream(&self, stream: &str) -> Result<()> {
+    let stream_dir = self.get_stream_dir(stream)?;
+    let seg_start_id = {
+      let lock = self.inner.streams.get_or_create(stream);
+      lock.lock().active_segment_start_id
+    };
+    let path = stream_dir.join(segment_filename(seg_start_id));
+    if let Some(segment) = self.inner.write_cache.fetch(&path) {
+      segment.flush()?;
+    }
+    Ok(())
+  }
 }

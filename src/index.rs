@@ -4,6 +4,11 @@ use memmap2::Mmap;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 
+#[inline(always)]
+fn read_u64_at(slice: &[u8], slot: usize) -> u64 {
+  u64::from_le_bytes(slice[slot * 8..slot * 8 + 8].try_into().unwrap())
+}
+
 /// Manages a memory-mapped `segments.idx` file for a single stream.
 /// Provides fast, disk-backed binary search for segment lookups.
 pub struct SegmentIndex {
@@ -41,39 +46,31 @@ impl SegmentIndex {
       return Ok(0);
     }
 
-    // Zero-cost transmutation of the byte slice to a u64 slice.
-    // Safety: We verified the length is a multiple of 8 in `open`.
-    let ids: &[u64] = unsafe { std::slice::from_raw_parts(self.mmap.as_ptr() as *const u64, self.mmap.len() / 8) };
+    let count = self.mmap.len() / 8;
+    let mut lo = 0usize;
+    let mut hi = count;
 
-    // Use Rust's built-in binary search on the slice.
-    match ids.binary_search(&target_id) {
-      // Exact match: the segment starts exactly at our target ID.
-      Ok(idx) => Ok(ids[idx]),
-      // No exact match: `idx` is the insertion point. The ID we want is
-      // in the segment that starts *before* this insertion point.
-      Err(idx) => {
-        if idx == 0 {
-          // This should not happen if the index is valid (first entry is always 0),
-          // but as a safeguard, we return 0.
-          Ok(0)
-        } else {
-          Ok(ids[idx - 1])
-        }
+    while lo < hi {
+      let mid = lo + (hi - lo) / 2;
+      let v = read_u64_at(&self.mmap, mid);
+      match v.cmp(&target_id) {
+        std::cmp::Ordering::Equal => return Ok(v),
+        std::cmp::Ordering::Less => lo = mid + 1,
+        std::cmp::Ordering::Greater => hi = mid,
       }
+    }
+
+    if lo == 0 {
+      Ok(0)
+    } else {
+      Ok(read_u64_at(&self.mmap, lo - 1))
     }
   }
 
-  /// Returns an iterator over all segment Start IDs in the index.
+  /// Returns an iterator over all segment start IDs in the index.
   pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
-    if self.mmap.is_empty() {
-      return [].iter().copied();
-    }
-
-    // Safety: The mmap is alive as long as &self is alive.
-    // Alignment verified in open().
-    let ids: &[u64] = unsafe { std::slice::from_raw_parts(self.mmap.as_ptr() as *const u64, self.mmap.len() / 8) };
-
-    ids.iter().copied()
+    let count = self.mmap.len() / 8;
+    (0..count).map(move |i| read_u64_at(&self.mmap, i))
   }
 }
 

@@ -27,7 +27,8 @@ Configuration for initializing the WAL.
 *   `pub root_path: PathBuf` - Directory where stream data is stored.
 *   `pub max_segment_size: u64` - Soft limit for segment file size before rotation.
 *   `pub max_entries_per_segment: u64` - Soft limit for entry count before rotation.
-*   `pub max_open_segments: usize` - Capacity of the LRU cache for open file descriptors.
+*   `pub max_open_segments: usize` - Capacity of the LRU cache for open **write** file descriptors. Default: 128.
+*   `pub max_open_read_segments: usize` - Capacity of the LRU cache for open **read** file descriptors on rotated (immutable) segments. Active segments always use a transient handle and are not counted. Default: 128.
 *   `pub write_buffer_size: usize` - Size of the in-memory write buffer (`BufWriter`).
 *   `pub read_buffer_size: usize` - Size of the in-memory read buffer (`BufReader`).
 *   `pub block_cache_size: Option<u64>` - Size of the read block cache (in bytes). `None` disables it.
@@ -119,11 +120,23 @@ A horizontal sharding wrapper around `Wal` with consistent checkpointing.
     *   Optimized version of `append_batch` that avoids repeated hashing.
     *   Returns vector of `(shard_id, sequence_id)`.
 
+**Durability Controls:**
+*   `pub fn flush_shard(&self, shard_id: u16) -> Result<()>`
+    *   Flushes the write buffer and calls `fsync` on the active segment for `shard_id`, then advances its watermark to the current write position.
+    *   **Required before `create_checkpoint`** when using `SyncMode::BatchOnly` or `Async` and writes were made via single `append` calls (not `append_batch`).
+    *   Always performs `fsync` regardless of the configured `SyncMode`.
+    *   Returns `Error::Config` if `shard_id >= shard_count`.
+*   `pub fn flush_all(&self) -> Result<()>`
+    *   Flushes and fsyncs all shards and advances all watermarks.
+    *   Equivalent to calling `flush_shard` for every shard ID.
+    *   The recommended call before `create_checkpoint` when operating under `SyncMode::BatchOnly` or `Async`.
+
 **Checkpoint Operations:**
 *   `pub fn create_checkpoint(&self, user_id: &[u8]) -> Result<()>`
     *   Creates a consistent snapshot of all shard offsets.
     *   `user_id` is a user-defined identifier (e.g., Raft index, transaction ID).
     *   Must be non-empty and ≤ 65535 bytes.
+    *   Under `SyncMode::BatchOnly` or `Async`: call `flush_all()` before this to ensure single-append writes are reflected in the checkpoint offsets.
 *   `pub fn load_checkpoint(&self, user_id: &[u8]) -> Result<CheckpointData>`
     *   Loads a specific checkpoint by its user-defined ID.
 *   `pub fn load_latest_checkpoint(&self) -> Result<(Vec<u8>, CheckpointData)>`

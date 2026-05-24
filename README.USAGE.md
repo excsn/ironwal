@@ -68,7 +68,8 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 *   **`root_path`** (`PathBuf`): The base directory where all stream data is stored.
 *   **`max_segment_size`** (`u64`): The soft limit (in bytes) for a segment file before rotation occurs. Default: 64 MB.
 *   **`max_entries_per_segment`** (`u64`): Soft limit for the number of entries per file. Default: Disabled (`u64::MAX`).
-*   **`max_open_segments`** (`usize`): The size of the LRU cache for open file descriptors. Increasing this improves performance for high-concurrency workloads but consumes more OS resources. Default: 50.
+*   **`max_open_segments`** (`usize`): The size of the LRU cache for open **write** file descriptors. Default: 128.
+*   **`max_open_read_segments`** (`usize`): The size of the LRU cache for open **read** file descriptors on rotated (immutable) segments. Active segments always use a transient handle and are not counted against this limit. Increase for workloads with many historical segments accessed concurrently. Default: 128.
 *   **`block_cache_size`** (`Option<u64>`): If set, enables an in-memory LRU cache for decompressed read blocks.
 
 ### Enums and Options
@@ -207,6 +208,35 @@ wal.create_checkpoint(checkpoint_id.to_string().as_bytes())?;
 * Must be non-empty
 * Maximum 65,535 bytes
 * Any binary data allowed (UTF-8 recommended)
+
+#### Durability and Sync Mode
+
+Under `SyncMode::Strict`, every `append` is immediately fsynced and its watermark is advanced, so `create_checkpoint` always captures the full written state.
+
+Under `SyncMode::BatchOnly` or `SyncMode::Async`, the watermark is only advanced automatically for `append_batch` / `append_batch_for_key` calls. Single `append` calls write data to the OS buffer but **do not advance the checkpoint watermark** until an explicit flush. If you create a checkpoint without flushing, it will record stale (lower) offsets for shards written via single appends.
+
+Call `flush_all()` before `create_checkpoint` to guarantee the snapshot reflects all written data:
+
+```rust
+// Write via single appends under BatchOnly or Async mode
+for i in 0..1000 {
+    wal.append(key.as_bytes(), b"data")?;
+}
+
+// Flush all shards: fsync + advance watermarks
+wal.flush_all()?;
+
+// Now the checkpoint will correctly capture offset 1000
+wal.create_checkpoint(b"snapshot_1")?;
+```
+
+To flush and sync only one shard:
+
+```rust
+wal.flush_shard(shard_id)?;
+```
+
+`flush_shard` and `flush_all` always call `fsync` regardless of the configured `SyncMode`.
 
 ---
 

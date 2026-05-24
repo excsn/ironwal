@@ -390,6 +390,39 @@ impl ShardedWal {
   pub fn inner(&self) -> &Wal {
     &self.inner
   }
+
+  /// Flushes and fsyncs the active segment for `shard_id`, then advances its
+  /// watermark to the current write position.
+  ///
+  /// Use this before `create_checkpoint` when operating under
+  /// `SyncMode::BatchOnly` or `SyncMode::Async` and you need the checkpoint
+  /// to reflect data written via single `append` calls.
+  pub fn flush_shard(&self, shard_id: u16) -> Result<()> {
+    if shard_id >= self.router.shard_count() {
+      return Err(Error::Config(format!(
+        "shard_id {} out of range (max: {})",
+        shard_id,
+        self.router.shard_count() - 1
+      )));
+    }
+    let stream = self.router.shard_name(shard_id);
+    self.inner.sync_stream(&stream)?;
+    if let Some(state) = self.inner.get_stream_state(&stream)? {
+      self.watermarks.set_durable(shard_id, state.next_id);
+    }
+    Ok(())
+  }
+
+  /// Flushes and fsyncs all shards and advances all watermarks.
+  ///
+  /// Call this before `create_checkpoint` for a fully consistent snapshot
+  /// when operating under `SyncMode::BatchOnly` or `SyncMode::Async`.
+  pub fn flush_all(&self) -> Result<()> {
+    for shard_id in 0..self.router.shard_count() {
+      self.flush_shard(shard_id)?;
+    }
+    Ok(())
+  }
 }
 
 #[cfg(test)]

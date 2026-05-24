@@ -137,15 +137,15 @@ impl ActiveSegment {
     loop {
       let header = match FrameHeader::read(&mut reader) {
         Ok(h) => h,
-        Err(_) => break, // EOF or corrupt header, stop scanning
+        Err(Error::Io(ref e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+        Err(Error::Corruption(_)) => break,
+        Err(e) => return Err(e),
       };
 
       let frame_len = FrameHeader::SIZE as u64 + header.disk_size as u64;
 
       // Verify payload exists physically on disk
-      if let Err(_) = reader.seek(SeekFrom::Current(header.disk_size as i64)) {
-        break;
-      }
+      reader.seek(SeekFrom::Current(header.disk_size as i64)).map_err(Error::Io)?;
 
       valid_end += frame_len;
     }
@@ -349,19 +349,9 @@ impl SegmentReader {
         loop {
           let header = match FrameHeader::read(reader) {
             Ok(h) => h,
-            Err(e) => {
-              // If we hit EOF, we are done.
-              if let Error::Io(ref io_err) = e {
-                if io_err.kind() == io::ErrorKind::UnexpectedEof {
-                  break;
-                }
-              }
-              // If we hit Invalid Magic (e.g. zeros or garbage), stop.
-              // Do not error; allow recovery to proceed.
-              // Ideally we check specifically for the "Invalid Frame Magic" string or type,
-              // but for now, any corruption at the frame boundary ends the scan.
-              break;
-            }
+            Err(Error::Io(ref e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(Error::Corruption(_)) => break,
+            Err(e) => return Err(e),
           };
           total_entries += header.entry_count as u64;
           reader.seek(SeekFrom::Current(header.disk_size as i64))?;
@@ -374,10 +364,10 @@ impl SegmentReader {
         let len = mmap.len();
         while cursor + FrameHeader::SIZE <= len {
           let mut header_slice = &mmap[cursor..];
-          // Same logic for Mmap: if header read fails (bad magic), we stop.
           let header = match FrameHeader::read(&mut header_slice) {
             Ok(h) => h,
-            Err(_) => break,
+            Err(Error::Corruption(_)) => break,
+            Err(e) => return Err(e),
           };
 
           let payload_end = cursor + FrameHeader::SIZE + header.disk_size as usize;
