@@ -73,7 +73,7 @@ pub struct WalOptions {
   // --- Resources ---
   /// Maximum number of file descriptors to keep open simultaneously
   /// for writing. Uses an LRU policy to enforce this limit.
-  /// Default: 50.
+  /// Default: 128.
   pub max_open_segments: usize,
 
   /// Maximum number of file descriptors to keep open for reading rotated

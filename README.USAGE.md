@@ -211,14 +211,16 @@ wal.create_checkpoint(checkpoint_id.to_string().as_bytes())?;
 
 #### Durability and Sync Mode
 
-Under `SyncMode::Strict`, every `append` is immediately fsynced and its watermark is advanced, so `create_checkpoint` always captures the full written state.
+Checkpoint watermarks only advance when data is actually durable (fsynced), so a checkpoint never references data that a power failure could erase:
 
-Under `SyncMode::BatchOnly` or `SyncMode::Async`, the watermark is only advanced automatically for `append_batch` / `append_batch_for_key` calls. Single `append` calls write data to the OS buffer but **do not advance the checkpoint watermark** until an explicit flush. If you create a checkpoint without flushing, it will record stale (lower) offsets for shards written via single appends.
+*   Under `SyncMode::Strict`, every `append` and `append_batch` is fsynced immediately, so `create_checkpoint` always captures the full written state.
+*   Under `SyncMode::BatchOnly`, batch commits (`append_batch` / `append_batch_for_key` / `TxnWriter::commit`) are fsynced and advance the watermark. Single `append` calls write to the OS buffer only and **do not advance the watermark** until an explicit flush.
+*   Under `SyncMode::Async`, nothing is fsynced automatically, so **no writes advance the watermark**. You must flush explicitly before checkpointing.
 
 Call `flush_all()` before `create_checkpoint` to guarantee the snapshot reflects all written data:
 
 ```rust
-// Write via single appends under BatchOnly or Async mode
+// Write under BatchOnly or Async mode
 for i in 0..1000 {
     wal.append(key.as_bytes(), b"data")?;
 }

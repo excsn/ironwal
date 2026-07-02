@@ -47,6 +47,9 @@ impl StreamStateMap {
     let new_state = Arc::new(Mutex::new(StreamState {
       next_id: 0,
       active_segment_start_id: 0,
+      // Not recovered from disk: if a segment file unexpectedly exists,
+      // the first write must repair its tail before appending.
+      tail_repaired: false,
     }));
     map.insert(key.to_string(), new_state.clone());
     new_state

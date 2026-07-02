@@ -159,6 +159,13 @@ impl ShardedWal {
   /// Batches spanning multiple shards are **not atomic** across shards.
   /// Each shard's batch is committed independently.
   ///
+  /// # Durability
+  ///
+  /// Under `Strict` and `BatchOnly`, batch commits are fsynced and advance
+  /// the checkpoint watermarks. Under `Async` nothing is fsynced, so
+  /// watermarks are **not** advanced — call [`ShardedWal::flush_all`] (or
+  /// [`ShardedWal::flush_shard`]) before `create_checkpoint`.
+  ///
   /// # Returns
   ///
   /// A vector of `(shard_id, sequence_id)` in the same order as input.
@@ -199,7 +206,7 @@ impl ShardedWal {
     for (shard_id, group) in shard_groups {
       let stream = self.router.shard_name(shard_id);
       let range = self.inner.append_batch(&stream, &group)?;
-      self.watermarks.set_durable(shard_id, range.end);
+      self.watermarks.update_batch(shard_id, range.end);
       shard_results.insert(shard_id, range);
     }
 
@@ -235,7 +242,7 @@ impl ShardedWal {
     let stream = self.router.shard_name(shard_id);
 
     let range = self.inner.append_batch(&stream, values)?;
-    self.watermarks.set_durable(shard_id, range.end);
+    self.watermarks.update_batch(shard_id, range.end);
 
     Ok(range.map(|seq_id| (shard_id, seq_id)).collect())
   }
@@ -354,6 +361,10 @@ impl ShardedWal {
         }
         Err(Error::StreamNotFound(_)) => {
           // Stream doesn't exist - skip it (no data to prune)
+          continue;
+        }
+        Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
+          // Shard directory or index missing - nothing to prune
           continue;
         }
         Err(e) => return Err(e),

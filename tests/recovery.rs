@@ -439,3 +439,143 @@ fn test_repair_on_restart_preserves_data() {
   // 6. Verify NEW data exists
   assert_eq!(wal.get(stream, 1).unwrap(), Some(b"next".to_vec()));
 }
+
+#[test]
+fn test_torn_tail_is_truncated_not_extended() {
+  // Regression test: a frame header whose payload was torn off by a crash
+  // must be truncated on recovery. The old repair logic seeked past EOF
+  // (which succeeds silently) and then zero-EXTENDED the file, permanently
+  // embedding a CRC-invalid frame in the log.
+  let mut opts = WalOptions::default();
+  opts.sync_mode = SyncMode::Strict;
+  let env = TestEnv::new(opts);
+  let stream = "torn_tail";
+
+  for i in 0..5 {
+    env
+      .wal
+      .append(stream, format!("entry_{}", i).as_bytes())
+      .unwrap();
+  }
+
+  let common::TestEnv { wal, _dir, root } = env;
+  drop(wal);
+
+  let segment_path = root.join(stream).join("00000000000000000000.wal");
+  let file = OpenOptions::new().write(true).open(&segment_path).unwrap();
+  let full_len = file.metadata().unwrap().len();
+  // Chop into the last frame's payload (headers are 32 bytes, payloads are
+  // 7 bytes, so -3 lands mid-payload of the final frame).
+  file.set_len(full_len - 3).unwrap();
+  drop(file);
+
+  // Restart: recovery must shrink the file to the last complete frame.
+  let wal = ironwal::Wal::new(WalOptions::new(&root)).unwrap();
+  let repaired_len = fs::metadata(&segment_path).unwrap().len();
+  assert!(
+    repaired_len < full_len - 3,
+    "Torn frame was not truncated (len {} of original {})",
+    repaired_len,
+    full_len
+  );
+
+  // Entries 0..=3 survive; entry 4 is gone.
+  let entries: Vec<_> = wal
+    .iter(stream, 0)
+    .unwrap()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("Iterator hit an error on a repaired log");
+  assert_eq!(entries.len(), 4);
+  assert_eq!(entries[3], b"entry_3".to_vec());
+  assert_eq!(wal.get(stream, 4).unwrap(), None);
+
+  // The next append must reuse ID 4 (no sequence gap over the torn frame).
+  let id = wal.append(stream, b"entry_4_again").unwrap();
+  assert_eq!(id, 4, "Recovered next_id counted the torn frame");
+
+  // The full log must remain readable end to end.
+  let entries: Vec<_> = wal
+    .iter(stream, 0)
+    .unwrap()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("Iterator hit an error after appending over the repaired tail");
+  assert_eq!(entries.len(), 5);
+  assert_eq!(entries[4], b"entry_4_again".to_vec());
+}
+
+#[test]
+fn test_inbounds_garbage_tail_is_dropped() {
+  // Regression test: a power failure can persist the file length without the
+  // payload blocks, leaving an in-bounds tail frame full of zeros. Recovery
+  // must CRC-check the final frame and drop it.
+  let mut opts = WalOptions::default();
+  opts.sync_mode = SyncMode::Strict;
+  let env = TestEnv::new(opts);
+  let stream = "garbage_tail";
+
+  env.wal.append(stream, b"good_entry").unwrap();
+  let segment_path = env.root.join(stream).join("00000000000000000000.wal");
+  let len_after_first = fs::metadata(&segment_path).unwrap().len();
+  env.wal.append(stream, b"victim_entry").unwrap();
+  let full_len = fs::metadata(&segment_path).unwrap().len();
+
+  let common::TestEnv { wal, _dir, root } = env;
+  drop(wal);
+
+  // Zero the second frame's payload while preserving the file length.
+  // The 32-byte frame header (with the original CRC) stays intact.
+  let mut file = OpenOptions::new().write(true).open(&segment_path).unwrap();
+  file.seek(SeekFrom::Start(len_after_first + 32)).unwrap();
+  let payload_len = (full_len - len_after_first - 32) as usize;
+  file.write_all(&vec![0u8; payload_len]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+
+  let wal = ironwal::Wal::new(WalOptions::new(&root)).unwrap();
+  assert_eq!(wal.get(stream, 0).unwrap(), Some(b"good_entry".to_vec()));
+  assert_eq!(
+    wal.get(stream, 1).unwrap(),
+    None,
+    "Garbage frame was served as data"
+  );
+  assert_eq!(
+    fs::metadata(&segment_path).unwrap().len(),
+    len_after_first,
+    "Garbage frame was not truncated"
+  );
+
+  // The dropped ID is reused and everything round-trips.
+  assert_eq!(wal.append(stream, b"replacement").unwrap(), 1);
+  assert_eq!(wal.get(stream, 1).unwrap(), Some(b"replacement".to_vec()));
+}
+
+#[test]
+fn test_corruption_policy_error_rejects_torn_tail() {
+  // With CorruptionPolicy::Error, recovery must refuse to open a stream with
+  // a torn tail instead of silently truncating it.
+  let mut opts = WalOptions::default();
+  opts.sync_mode = SyncMode::Strict;
+  let env = TestEnv::new(opts);
+  let stream = "strict_policy";
+
+  env.wal.append(stream, b"entry_a").unwrap();
+  env.wal.append(stream, b"entry_b").unwrap();
+
+  let common::TestEnv { wal, _dir, root } = env;
+  drop(wal);
+
+  let segment_path = root.join(stream).join("00000000000000000000.wal");
+  let file = OpenOptions::new().write(true).open(&segment_path).unwrap();
+  let full_len = file.metadata().unwrap().len();
+  file.set_len(full_len - 3).unwrap();
+  drop(file);
+
+  let mut opts = WalOptions::new(&root);
+  opts.on_corruption = ironwal::CorruptionPolicy::Error;
+  let result = ironwal::Wal::new(opts);
+  assert!(
+    matches!(result, Err(Error::Corruption(_))),
+    "Expected Corruption error under CorruptionPolicy::Error, got {:?}",
+    result.err()
+  );
+}

@@ -24,7 +24,7 @@
 //! ├─────────────────────────────────────────────────────────────┤
 //! │ USER_ID        │ N bytes  │ User-provided checkpoint ID     │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │ TIMESTAMP      │ 8 bytes  │ Unix timestamp in seconds      │
+//! │ TIMESTAMP      │ 8 bytes  │ Unix timestamp in nanoseconds  │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │ SHARD_COUNT    │ 2 bytes  │ Number of shards (u16 LE)      │
 //! ├─────────────────────────────────────────────────────────────┤
@@ -52,7 +52,7 @@ pub struct CheckpointEntry {
   /// User-provided checkpoint identifier (e.g., Raft index, transaction ID)
   pub user_id: Vec<u8>,
 
-  /// Unix timestamp when checkpoint was created
+  /// Unix timestamp (nanoseconds) when checkpoint was created
   pub timestamp: u64,
 
   /// Number of shards (for validation)
@@ -68,7 +68,7 @@ impl CheckpointEntry {
   /// # Arguments
   ///
   /// * `user_id` - User-defined checkpoint identifier (must be non-empty, ≤ 65535 bytes)
-  /// * `timestamp` - Unix timestamp in seconds
+  /// * `timestamp` - Unix timestamp in nanoseconds
   /// * `offsets` - Durable offset for each shard (length must equal shard_count)
   ///
   /// # Errors

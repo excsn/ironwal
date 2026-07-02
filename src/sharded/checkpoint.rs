@@ -18,7 +18,7 @@ pub struct CheckpointData {
   /// Durable offset for each shard (indexed by shard_id)
   pub offsets: Vec<u64>,
 
-  /// Unix timestamp when checkpoint was created
+  /// Unix timestamp (nanoseconds) when checkpoint was created
   pub timestamp: u64,
 
   /// Number of shards (for validation)
@@ -130,13 +130,15 @@ impl CheckpointManager {
     // Serialize
     let serialized = entry.serialize()?;
 
-    // Append to log file
+    // Append to log file. The lock is held through the index and HEAD
+    // updates so a concurrent `compact` cannot swap the log/index between
+    // our append and our index insert (which would silently drop this
+    // checkpoint).
     let mut log = self.log_file.lock();
     let file_offset = log.stream_position()?;
     log.write_all(&serialized)?;
     log.flush()?;
     log.get_ref().sync_data()?;
-    drop(log);
 
     // Update index
     self.index.insert(
@@ -150,6 +152,7 @@ impl CheckpointManager {
 
     // Update HEAD
     head::write_head(&self.root, user_id)?;
+    drop(log);
 
     Ok(())
   }
@@ -264,6 +267,13 @@ impl CheckpointManager {
     let log_path = self.root.join("checkpoints.log");
     let temp_path = self.root.join("checkpoints.log.tmp");
 
+    // Hold the log lock for the entire operation. `create` also holds it
+    // across its append + index insert, so nothing can write to the old log
+    // or the index between our snapshot and the swap below — a checkpoint
+    // created concurrently would otherwise be silently lost.
+    let mut log = self.log_file.lock();
+    log.flush()?;
+
     // Get old file size
     let old_size = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
@@ -284,7 +294,8 @@ impl CheckpointManager {
     let mut new_offset = 0u64;
 
     for (user_id, old_metadata) in &all_checkpoints {
-      // Load the entry from old log
+      // Load the entry from old log (opens its own read handle; does not
+      // touch the locked writer).
       let data = self.load(user_id)?;
 
       // Recreate entry
@@ -311,9 +322,6 @@ impl CheckpointManager {
     temp_file.get_ref().sync_all()?;
     drop(temp_file);
 
-    // Close current log file
-    drop(self.log_file.lock());
-
     // Atomic rename
     std::fs::rename(&temp_path, &log_path)?;
 
@@ -321,13 +329,15 @@ impl CheckpointManager {
     let dir = File::open(&self.root)?;
     dir.sync_all()?;
 
-    // Reopen log file in append mode
+    // Point the shared writer at the new file and swap the index, still
+    // under the lock.
     let mut file = OpenOptions::new().append(true).open(&log_path)?;
     file.seek(SeekFrom::End(0))?;
-    *self.log_file.lock() = BufWriter::new(file);
+    *log = BufWriter::new(file);
 
     // Replace index with compacted version
     self.index.replace_with(new_index);
+    drop(log);
 
     let new_size = std::fs::metadata(&log_path)?.len();
 

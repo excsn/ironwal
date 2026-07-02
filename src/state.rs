@@ -12,6 +12,11 @@ pub(crate) struct StreamState {
   pub next_id: u64,
   /// The Start ID of the file we are currently appending to.
   pub active_segment_start_id: u64,
+  /// Whether the on-disk tail of the active segment is known to be intact.
+  /// True after startup recovery (which truncates torn tails) and stays true
+  /// for the process lifetime: every write descriptor is flushed on eviction,
+  /// so reopening after a cache miss never requires another repair scan.
+  pub tail_repaired: bool,
 }
 
 /// Metadata stored in the `head.state` file for each stream.

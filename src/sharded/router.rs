@@ -1,11 +1,15 @@
 //! Key-based routing to determine shard assignment.
 //!
-//! Uses SipHash-1-3 for fast, uniform distribution across shards.
+//! Uses the standard library's `DefaultHasher` (SipHash-based) for fast,
+//! uniform distribution across shards.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-/// Routes keys to shard IDs via consistent hashing.
+/// Routes keys to shard IDs via `hash(key) % shard_count`.
+///
+/// The shard count is fixed at construction: changing it re-routes
+/// existing keys, so it requires a data migration.
 pub struct Router {
   shard_count: u16,
 }

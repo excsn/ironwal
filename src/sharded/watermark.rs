@@ -28,23 +28,41 @@ impl WatermarkTracker {
     }
   }
 
-  /// Updates the watermark for a shard if appropriate for the sync mode.
+  /// Updates the watermark for a shard after a single append, if appropriate
+  /// for the sync mode.
   ///
   /// # Behavior by SyncMode
   ///
   /// - `Strict`: Always updates (data is durable immediately)
-  /// - `BatchOnly`: Updates only during batch commits (caller's responsibility)
-  /// - `Async`: No automatic updates (requires manual flush tracking)
+  /// - `BatchOnly` / `Async`: No automatic updates (single appends are not
+  ///   fsynced; requires an explicit flush)
   pub fn update(&self, shard_id: u16, offset: u64) {
     if self.sync_mode == SyncMode::Strict {
-      self.watermarks[shard_id as usize].store(offset, Ordering::Release);
+      self.set_durable(shard_id, offset);
     }
-    // For BatchOnly and Async, caller must explicitly call set_durable
   }
 
-  /// Forcibly sets a watermark (used for batch commits and manual updates).
+  /// Updates the watermark for a shard after a batch append, if appropriate
+  /// for the sync mode.
+  ///
+  /// # Behavior by SyncMode
+  ///
+  /// - `Strict` / `BatchOnly`: Updates (batch commits are fsynced)
+  /// - `Async`: No automatic updates — batches are only flushed to the OS
+  ///   buffer, not fsynced, so advancing the watermark would let checkpoints
+  ///   reference data that a power failure can erase. Requires an explicit
+  ///   flush.
+  pub fn update_batch(&self, shard_id: u16, offset: u64) {
+    if self.sync_mode != SyncMode::Async {
+      self.set_durable(shard_id, offset);
+    }
+  }
+
+  /// Marks an offset as durable (used after fsynced batch commits and
+  /// explicit flushes). Monotonic: concurrent writers to the same shard may
+  /// report completions out of order, so the watermark only ever advances.
   pub fn set_durable(&self, shard_id: u16, offset: u64) {
-    self.watermarks[shard_id as usize].store(offset, Ordering::Release);
+    self.watermarks[shard_id as usize].fetch_max(offset, Ordering::AcqRel);
   }
 
   /// Gets the current durable offset for a shard.
@@ -117,6 +135,32 @@ mod tests {
 
     // But set_durable works
     tracker.set_durable(0, 100);
+    assert_eq!(tracker.get(0), 100);
+  }
+
+  #[test]
+  fn test_update_batch_by_mode() {
+    let strict = WatermarkTracker::new(1, SyncMode::Strict);
+    strict.update_batch(0, 5);
+    assert_eq!(strict.get(0), 5);
+
+    let batch_only = WatermarkTracker::new(1, SyncMode::BatchOnly);
+    batch_only.update_batch(0, 5);
+    assert_eq!(batch_only.get(0), 5);
+
+    // Async batches are not fsynced; the watermark must not move.
+    let asynchronous = WatermarkTracker::new(1, SyncMode::Async);
+    asynchronous.update_batch(0, 5);
+    assert_eq!(asynchronous.get(0), 0);
+  }
+
+  #[test]
+  fn test_watermarks_never_regress() {
+    let tracker = WatermarkTracker::new(1, SyncMode::Strict);
+    tracker.set_durable(0, 100);
+    tracker.set_durable(0, 50);
+    assert_eq!(tracker.get(0), 100);
+    tracker.update(0, 40);
     assert_eq!(tracker.get(0), 100);
   }
 

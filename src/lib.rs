@@ -25,8 +25,8 @@
 //! // Atomic append
 //! let id = wal.append("user_ledger", b"transaction_data")?;
 //!
-//! // Batch append
-//! let ids = wal.append_batch("user_ledger", &[b"tx_1", b"tx_2"])?;
+//! // Atomic batch append; returns the `Range<u64>` of assigned IDs
+//! let range = wal.append_batch("user_ledger", &[b"tx_1", b"tx_2"])?;
 //! # Ok(())
 //! # }
 //! ```

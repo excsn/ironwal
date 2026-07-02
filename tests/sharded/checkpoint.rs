@@ -237,3 +237,34 @@ fn test_multiple_checkpoints() {
     assert_eq!(data.shard_count, 4);
   }
 }
+
+#[test]
+fn test_async_batches_do_not_advance_watermarks() {
+  // Under SyncMode::Async nothing is fsynced, so checkpoints must not claim
+  // durability for batch appends until an explicit flush.
+  let dir = TempDir::new().unwrap();
+  let mut opts = WalOptions::default();
+  opts.root_path = dir.path().to_path_buf();
+  opts.sync_mode = ironwal::SyncMode::Async;
+  let wal = ShardedWal::new(opts, 2).unwrap();
+
+  let batch: Vec<(Vec<u8>, Vec<u8>)> = (0..10)
+    .map(|i| (format!("k{}", i).into_bytes(), b"v".to_vec()))
+    .collect();
+  wal.append_batch(&batch).unwrap();
+
+  wal.create_checkpoint(b"before_flush").unwrap();
+  let data = wal.load_checkpoint(b"before_flush").unwrap();
+  assert!(
+    data.offsets.iter().all(|&o| o == 0),
+    "Async checkpoint claimed non-durable data: {:?}",
+    data.offsets
+  );
+
+  // After an explicit flush (fsync + watermark advance) the checkpoint
+  // reflects everything.
+  wal.flush_all().unwrap();
+  wal.create_checkpoint(b"after_flush").unwrap();
+  let data = wal.load_checkpoint(b"after_flush").unwrap();
+  assert_eq!(data.offsets.iter().sum::<u64>(), 10);
+}

@@ -16,7 +16,7 @@ use crate::batch::TxnWriter;
 use crate::config::{SyncMode, WalOptions};
 use crate::error::{Error, Result};
 use crate::index::{self, SegmentIndex};
-use crate::segment::{ActiveSegment, CachedReadDescriptor, SegmentReader};
+use crate::segment::{ActiveSegment, CachedReadDescriptor, FrameLocation, SegmentReader};
 use crate::state::{StreamState, StreamStateFile};
 use crate::util::{self, segment_filename};
 use crate::wal::stream_map::StreamStateMap;
@@ -26,6 +26,9 @@ use crate::wal::stream_map::StreamStateMap;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct BlockCacheKey {
   /// A hash of the stream key to keep the key size manageable.
+  /// Known trade-off: a 64-bit cross-stream hash collision (combined with an
+  /// identical segment start ID and frame offset) would serve cached entries
+  /// from the wrong stream. The probability is negligible in practice.
   pub stream_hash: u64,
   /// The start ID of the segment file containing the block.
   pub segment_start_id: u64,
@@ -86,11 +89,14 @@ impl WalState {
       &self.options,
     )?;
 
-    if exists {
-      // If we are opening an existing file for writing (e.g. after a restart),
-      // we MUST repair it to ensure we don't append after a corrupted tail.
+    if exists && !state.tail_repaired {
+      // Opening an existing file whose tail we haven't verified in this
+      // process: repair to ensure we don't append after a corrupted tail.
+      // Reopens after LRU eviction skip this — eviction flushes the buffer,
+      // so the tail cannot be torn within a process lifetime.
       new_segment.repair()?;
     }
+    state.tail_repaired = true;
 
     // 3. Insert the known-good segment into the cache. The cost is 1 (one file handle).
     self
@@ -136,9 +142,12 @@ impl WalState {
 
     // --- Check for Rotation ---
     // Estimate: payload size + fixed frame overhead
+    // Entry count is derived from the sequencer state (exact across restarts
+    // and descriptor reopens, unlike a per-file-handle counter).
     let entry_size_estimate = entry[0].len() as u64 + 32;
+    let entries_in_segment = state.next_id - state.active_segment_start_id;
     let needs_rotation = (segment.size() + entry_size_estimate) > self.options.max_segment_size
-      || segment.count() >= self.options.max_entries_per_segment;
+      || entries_in_segment >= self.options.max_entries_per_segment;
 
     let final_segment = if needs_rotation {
       self.rotate_segment(stream, state)?
@@ -216,11 +225,12 @@ impl WalState {
       entries_processed += chunk.len();
 
       // --- Check for Rotation (After Write) ---
-      let segment_ref_check = self.get_or_create_segment(stream, state)?;
-
+      // The Arc we appended through still tracks the file size; no need to
+      // re-fetch from the cache.
+      let entries_in_segment = state.next_id - state.active_segment_start_id;
       let needs_rotation = entries_processed < entries.len() // More data to write
-        && (segment_ref_check.size() >= self.options.max_segment_size
-        || segment_ref_check.count() >= self.options.max_entries_per_segment);
+        && (segment.size() >= self.options.max_segment_size
+        || entries_in_segment >= self.options.max_entries_per_segment);
 
       if needs_rotation {
         self.rotate_segment(stream, state)?;
@@ -352,6 +362,10 @@ impl Wal {
   }
 
   /// Creates an iterator to read entries sequentially starting from `start_id`.
+  ///
+  /// Note: if `start_id` falls in a region already deleted by [`Wal::truncate`],
+  /// the iterator yields nothing. Start from a known-surviving ID (e.g. the
+  /// `safe_id` passed to the last truncation) to read the remaining history.
   pub fn iter(&self, stream: &str, start_id: u64) -> Result<crate::iter::WalIterator> {
     crate::iter::WalIterator::new(self.clone(), stream.to_string(), start_id)
   }
@@ -467,16 +481,42 @@ impl Wal {
       return Ok(Some(StreamState {
         next_id: active_segment_start_id,
         active_segment_start_id,
+        tail_repaired: true,
       }));
     }
 
     let mut reader = SegmentReader::open(&active_segment_path, options)?;
-    let entries_in_segment = reader.recover_scan()?;
+    let (entries_in_segment, valid_len) = reader.recover_scan()?;
+    drop(reader); // Release any mmap before truncating below.
+
+    // Handle a torn tail (crash mid-write) right away, so readers never
+    // encounter it and the counted entries always match the file contents.
+    let disk_len = fs::metadata(&active_segment_path)?.len();
+    if valid_len < disk_len {
+      if options.on_corruption == crate::config::CorruptionPolicy::Error {
+        return Err(Error::Corruption(format!(
+          "Torn tail in {}: {} valid bytes of {} on disk",
+          active_segment_path.display(),
+          valid_len,
+          disk_len
+        )));
+      }
+      tracing::warn!(
+        target: "ironwal",
+        "Truncating torn tail of {} from {} to {} bytes",
+        active_segment_path.display(), disk_len, valid_len
+      );
+      let file = OpenOptions::new().write(true).open(&active_segment_path)?;
+      file.set_len(valid_len)?;
+      file.sync_all()?;
+    }
+
     let next_id = active_segment_start_id + entries_in_segment;
 
     Ok(Some(StreamState {
       next_id,
       active_segment_start_id,
+      tail_repaired: true,
     }))
   }
 
@@ -516,6 +556,10 @@ impl Wal {
   // --- Write Operations ---
 
   /// Appends a single entry to the stream.
+  ///
+  /// Note: stream names are sanitized to a filesystem-safe character set;
+  /// names that differ only in replaced characters (e.g. `"a/b"` and `"a_b"`)
+  /// alias to the same stream.
   pub fn append(&self, stream: &str, entry: &[u8]) -> Result<u64> {
     let stream_lock = self.inner.streams.get_or_create(stream);
     let mut state = stream_lock.lock();
@@ -577,9 +621,14 @@ impl Wal {
       // Transient handle respecting the configured ReadStrategy — bypasses the
       // persistent descriptor cache. Safe for mmap: file only grows, reader
       // bounds-checks against the snapshot length, SIGBUS is impossible.
-      let mut reader = SegmentReader::open(&segment_path, &self.inner.options)?;
+      let mut reader = match SegmentReader::open(&segment_path, &self.inner.options) {
+        Ok(r) => r,
+        // Deleted by a concurrent truncate between the exists() check and here.
+        Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+      };
 
-      let frame_loc = match reader.find_frame(id)? {
+      let frame_loc = match reader.find_frame(id, None)? {
         Some(loc) => loc,
         None => return Ok(None),
       };
@@ -616,7 +665,12 @@ impl Wal {
 
     } else {
       // Rotated (immutable) segment — use (or populate) the read descriptor cache.
-      let desc = self.get_or_load_read_descriptor(&segment_path)?;
+      let desc = match self.get_or_load_read_descriptor(&segment_path) {
+        Ok(d) => d,
+        // Deleted by a concurrent truncate between the exists() check and here.
+        Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+      };
 
       let frame_loc = match desc.find_frame(id)? {
         Some(loc) => loc,
@@ -691,11 +745,15 @@ impl Wal {
 
     let mut results = vec![None; ids.len()];
 
-    for (segment_start_id, group) in segment_groups {
+    for (segment_start_id, mut group) in segment_groups {
       let segment_path = stream_dir.join(segment_filename(segment_start_id));
       if !segment_path.exists() {
         continue;
       }
+
+      // Ascending IDs let the active-segment scan resume from the previous
+      // frame instead of rewinding to offset 0 for every lookup.
+      group.sort_unstable_by_key(|&(_, id)| id);
 
       let is_active = active_seg_id == Some(segment_start_id);
 
@@ -703,13 +761,20 @@ impl Wal {
         // Transient handle respecting the configured ReadStrategy — bypasses
         // the persistent descriptor cache. Mmap is safe here for the same
         // reason as in get(): the file only grows, bounds are fixed at open time.
-        let mut reader = SegmentReader::open(&segment_path, &self.inner.options)?;
+        let mut reader = match SegmentReader::open(&segment_path, &self.inner.options) {
+          Ok(r) => r,
+          // Deleted by a concurrent truncate between the exists() check and here.
+          Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+          Err(e) => return Err(e),
+        };
+        let mut last_loc: Option<FrameLocation> = None;
 
         for (result_idx, id) in group {
-          let frame_loc = match reader.find_frame(id)? {
+          let frame_loc = match reader.find_frame(id, last_loc.as_ref())? {
             Some(loc) => loc,
             None => continue,
           };
+          last_loc = Some(frame_loc.clone());
 
           let cache_key = BlockCacheKey { stream_hash, segment_start_id, frame_offset: frame_loc.offset };
 
@@ -733,7 +798,12 @@ impl Wal {
         }
       } else {
         // Cached descriptor shared across all IDs in this rotated segment group.
-        let desc = self.get_or_load_read_descriptor(&segment_path)?;
+        let desc = match self.get_or_load_read_descriptor(&segment_path) {
+          Ok(d) => d,
+          // Deleted by a concurrent truncate between the exists() check and here.
+          Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+          Err(e) => return Err(e),
+        };
 
         for (result_idx, id) in group {
           let frame_loc = match desc.find_frame(id)? {
@@ -847,9 +917,10 @@ impl Wal {
 
       self.inner.index_cache.invalidate(&idx_path);
       let current_index = self.get_or_load_index(&stream_dir, &idx_path)?;
+      let deleted_set: std::collections::HashSet<u64> = deleted_ids.iter().copied().collect();
       let new_ids: Vec<u64> = current_index
         .iter()
-        .filter(|id| !deleted_ids.contains(id))
+        .filter(|id| !deleted_set.contains(id))
         .collect();
 
       let temp_path = stream_dir.join("segments.idx.tmp");
@@ -882,13 +953,7 @@ impl Wal {
   ///
   /// Returns None if the stream doesn't exist yet.
   pub(crate) fn get_stream_state(&self, stream: &str) -> Result<Option<StreamState>> {
-    Ok(self.inner.streams.get(stream).map(|lock| {
-      let state = lock.lock();
-      StreamState {
-        next_id: state.next_id,
-        active_segment_start_id: state.active_segment_start_id,
-      }
-    }))
+    Ok(self.inner.streams.get(stream).map(|lock| lock.lock().clone()))
   }
 
   /// Flushes the BufWriter and calls `fsync` on the active segment for `stream`.

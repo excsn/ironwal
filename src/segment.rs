@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::config::{CompressionType, ReadStrategy, WalOptions};
 use crate::error::{Error, Result};
@@ -24,8 +24,6 @@ pub(crate) struct FrameLocation {
 struct InnerSegment {
   file: BufWriter<File>,
   current_size: u64,
-  /// Number of entries written *in this session* (or total if tracked)
-  entry_count: u64,
 }
 
 /// Represents an active segment file opened for WRITING.
@@ -50,7 +48,6 @@ impl ActiveSegment {
       inner: Mutex::new(InnerSegment {
         file: writer,
         current_size,
-        entry_count: 0,
       }),
     })
   }
@@ -91,7 +88,6 @@ impl ActiveSegment {
     // 5. Update stats
     let bytes_written = FrameHeader::SIZE as u64 + disk_payload.len() as u64;
     inner.current_size += bytes_written;
-    inner.entry_count += count as u64;
 
     Ok(batch_start_id..batch_start_id + count as u64)
   }
@@ -99,11 +95,6 @@ impl ActiveSegment {
   /// Returns current file size for rotation checks.
   pub fn size(&self) -> u64 {
     self.inner.lock().current_size
-  }
-
-  /// Returns entry count for rotation checks.
-  pub fn count(&self) -> u64 {
-    self.inner.lock().entry_count
   }
 
   pub fn flush(&self) -> Result<()> {
@@ -131,24 +122,10 @@ impl ActiveSegment {
     // 2. Open a fresh read-only handle to inspect the file
     // We cannot use the inner.file handle because it is opened in 'append' mode,
     // which may not support reading/seeking on some platforms.
-    let mut reader = File::open(&self.path)?;
-    let mut valid_end = 0;
-
-    loop {
-      let header = match FrameHeader::read(&mut reader) {
-        Ok(h) => h,
-        Err(Error::Io(ref e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-        Err(Error::Corruption(_)) => break,
-        Err(e) => return Err(e),
-      };
-
-      let frame_len = FrameHeader::SIZE as u64 + header.disk_size as u64;
-
-      // Verify payload exists physically on disk
-      reader.seek(SeekFrom::Current(header.disk_size as i64)).map_err(Error::Io)?;
-
-      valid_end += frame_len;
-    }
+    // The scan must agree exactly with `recover_scan`, so the recovered
+    // `next_id` and the repaired file tail always match.
+    let mut reader = SegmentReader::open_io(&self.path, 64 * 1024)?;
+    let (_, valid_end) = reader.recover_scan()?;
 
     // 3. Truncate using the write handle
     let mut inner = self.inner.lock();
@@ -236,7 +213,14 @@ impl SegmentReader {
         };
 
         let mut payload = vec![0u8; header.disk_size as usize];
-        reader.read_exact(&mut payload)?;
+        if let Err(e) = reader.read_exact(&mut payload) {
+          if e.kind() == io::ErrorKind::UnexpectedEof {
+            // Torn tail: the header was written but the payload was not.
+            // This can only occur at the physical end of the log.
+            return Ok(None);
+          }
+          return Err(Error::Io(e));
+        }
 
         let calc_crc = calculate_checksum(header.start_id, header.entry_count, header.frame_type, &payload);
         if calc_crc != header.crc {
@@ -262,7 +246,9 @@ impl SegmentReader {
         let payload_end = payload_start + header.disk_size as usize;
 
         if payload_end > mmap.len() {
-          return Err(Error::Corruption("Frame payload truncated".into()));
+          // Torn or still-growing tail beyond this mapping's snapshot.
+          // Treat as end-of-log rather than corruption.
+          return Ok(None);
         }
 
         let payload = &mmap[payload_start..payload_end];
@@ -340,11 +326,24 @@ impl SegmentReader {
     }
   }
 
-  /// Efficiently scans the segment headers to calculate the total number of entries.
-  pub fn recover_scan(&mut self) -> Result<u64> {
+  /// Scans the segment to determine the valid tail of the log.
+  ///
+  /// Returns `(total_entries, valid_len)` where `valid_len` is the byte offset
+  /// just past the last fully-written tail frame. Frames whose payload extends
+  /// past the physical end of the file are rejected (a seek past EOF succeeds
+  /// silently, so bounds are checked against the real file length). The final
+  /// in-bounds frame is additionally CRC-validated: an all-zero payload that
+  /// fails the CRC is a torn tail (power failure persisted the length before
+  /// the data blocks) and is excluded, while a non-zero CRC failure is bit rot
+  /// and is kept so reads surface `CrcMismatch` rather than losing data
+  /// silently.
+  pub fn recover_scan(&mut self) -> Result<(u64, u64)> {
     match self {
       Self::Io(reader) => {
-        let mut total_entries = 0;
+        let file_len = reader.get_ref().metadata()?.len();
+        let mut total_entries: u64 = 0;
+        let mut pos: u64 = 0;
+        let mut last_frame: Option<(u64, FrameHeader)> = None;
         reader.seek(SeekFrom::Start(0))?;
         loop {
           let header = match FrameHeader::read(reader) {
@@ -353,15 +352,49 @@ impl SegmentReader {
             Err(Error::Corruption(_)) => break,
             Err(e) => return Err(e),
           };
-          total_entries += header.entry_count as u64;
+          let frame_len = FrameHeader::SIZE as u64 + header.disk_size as u64;
+          if pos + frame_len > file_len {
+            // Torn tail: header is present but the payload is not.
+            break;
+          }
           reader.seek(SeekFrom::Current(header.disk_size as i64))?;
+          total_entries += header.entry_count as u64;
+          last_frame = Some((pos, header));
+          pos += frame_len;
         }
-        Ok(total_entries)
+
+        if let Some((offset, header)) = last_frame {
+          reader.seek(SeekFrom::Start(offset + FrameHeader::SIZE as u64))?;
+          let mut payload = vec![0u8; header.disk_size as usize];
+          let torn = match reader.read_exact(&mut payload) {
+            Ok(()) => {
+              let crc = calculate_checksum(
+                header.start_id,
+                header.entry_count,
+                header.frame_type,
+                &payload,
+              );
+              // A power failure can persist the file length before the data
+              // blocks, which then read back as zeros — that is a torn tail.
+              // A CRC mismatch over NON-zero data is bit rot: keep the frame
+              // so reads surface CrcMismatch instead of silently deleting it.
+              crc != header.crc && payload.iter().all(|&b| b == 0)
+            }
+            Err(_) => true,
+          };
+          if torn {
+            total_entries -= header.entry_count as u64;
+            pos = offset;
+          }
+        }
+
+        Ok((total_entries, pos))
       }
       Self::Mmap(mmap, _) => {
         let mut cursor = 0;
-        let mut total_entries = 0;
+        let mut total_entries: u64 = 0;
         let len = mmap.len();
+        let mut last_frame: Option<(usize, FrameHeader)> = None;
         while cursor + FrameHeader::SIZE <= len {
           let mut header_slice = &mmap[cursor..];
           let header = match FrameHeader::read(&mut header_slice) {
@@ -375,20 +408,47 @@ impl SegmentReader {
             break;
           }
           total_entries += header.entry_count as u64;
+          last_frame = Some((cursor, header));
           cursor = payload_end;
         }
-        Ok(total_entries)
+
+        if let Some((offset, header)) = last_frame {
+          let start = offset + FrameHeader::SIZE;
+          let payload = &mmap[start..start + header.disk_size as usize];
+          let crc =
+            calculate_checksum(header.start_id, header.entry_count, header.frame_type, payload);
+          // See the Io arm: all-zero payload = torn tail (truncate); non-zero
+          // mismatch = bit rot (keep, surfaced as CrcMismatch on read).
+          if crc != header.crc && payload.iter().all(|&b| b == 0) {
+            total_entries -= header.entry_count as u64;
+            cursor = offset;
+          }
+        }
+
+        Ok((total_entries, cursor as u64))
       }
     }
   }
 
   /// Efficiently scans the segment headers to find the frame containing the target ID.
   /// Does NOT read or decompress the payload.
-  pub fn find_frame(&mut self, target_id: u64) -> Result<Option<FrameLocation>> {
+  ///
+  /// `hint` is an optional previously-found frame in this segment: when the
+  /// target lies at or beyond it, scanning resumes from the hint's offset
+  /// instead of the start of the file.
+  pub fn find_frame(
+    &mut self,
+    target_id: u64,
+    hint: Option<&FrameLocation>,
+  ) -> Result<Option<FrameLocation>> {
+    let start_offset = match hint {
+      Some(loc) if target_id >= loc.header.start_id => loc.offset,
+      _ => 0,
+    };
     match self {
       Self::Io(reader) => {
-        reader.seek(SeekFrom::Start(0))?;
-        let mut offset = 0;
+        reader.seek(SeekFrom::Start(start_offset))?;
+        let mut offset = start_offset;
         loop {
           let header = match FrameHeader::read(reader) {
             Ok(h) => h,
@@ -421,7 +481,7 @@ impl SegmentReader {
         }
       }
       Self::Mmap(mmap, _) => {
-        let mut cursor = 0;
+        let mut cursor = start_offset as usize;
         let len = mmap.len();
         while cursor + FrameHeader::SIZE <= len {
           let current_offset = cursor as u64;
@@ -574,89 +634,125 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
 // CachedReadDescriptor
 // ---------------------------------------------------------------------------
 
-/// A stateless, cloneable read handle for an immutable (rotated) segment file.
+/// A stateless read handle for an immutable (rotated) segment file.
 ///
 /// Both variants support concurrent access from multiple threads without a
 /// shared mutex: `Io` uses platform pread-style APIs (no shared cursor),
 /// `Mmap` does lock-free slice indexing into a read-only mapping.
 ///
+/// Because rotated segments are immutable, the descriptor lazily builds a
+/// per-frame `(start_id, offset)` index on the first lookup, turning
+/// subsequent `find_frame` calls into a binary search instead of a linear
+/// header scan (one pread per frame). The index costs 16 bytes per frame and
+/// is evicted together with the descriptor by the LRU cache.
+///
 /// Only rotated segments are stored here. The active segment is always opened
-/// with a fresh transient `SegmentReader::open_io` handle to avoid SIGBUS
-/// and stale-EOF risks from a growing file.
-pub(crate) enum CachedReadDescriptor {
-  /// Standard-IO path: `Arc<File>` shared across threads; each read computes
-  /// its own offset via `read_exact_at`.
-  Io(Arc<File>),
+/// with a fresh transient `SegmentReader` handle to avoid stale-EOF risks
+/// from a growing file.
+pub(crate) struct CachedReadDescriptor {
+  inner: ReadDescriptorInner,
+  /// Lazily-built sorted `(start_id, offset)` pairs for every frame.
+  frame_index: OnceLock<Box<[(u64, u64)]>>,
+}
+
+enum ReadDescriptorInner {
+  /// Standard-IO path: each read computes its own offset via `read_exact_at`.
+  Io(File),
   /// Mmap path: the file is mapped once; concurrent slice reads are inherently safe.
-  Mmap(Arc<Mmap>),
+  Mmap(Mmap),
 }
 
 impl CachedReadDescriptor {
   pub fn open(path: &Path, options: &WalOptions) -> Result<Self> {
     let file = File::open(path)?;
-    if options.read_strategy == ReadStrategy::Mmap {
+    let inner = if options.read_strategy == ReadStrategy::Mmap {
       // Safety: rotated segments are immutable; the mapping will not be
       // invalidated by concurrent writes.
       let mmap = unsafe { Mmap::map(&file)? };
-      return Ok(Self::Mmap(Arc::new(mmap)));
-    }
-    Ok(Self::Io(Arc::new(file)))
+      ReadDescriptorInner::Mmap(mmap)
+    } else {
+      ReadDescriptorInner::Io(file)
+    };
+    Ok(Self {
+      inner,
+      frame_index: OnceLock::new(),
+    })
   }
 
-  /// Scans frame headers at sequential pread offsets to find the frame
-  /// containing `target_id`.  Entirely stateless — safe to call concurrently
-  /// on the same descriptor instance.
-  pub fn find_frame(&self, target_id: u64) -> Result<Option<FrameLocation>> {
-    match self {
-      Self::Io(file) => {
-        let mut offset = 0u64;
+  /// Reads and parses one frame header at `offset`.
+  /// Returns `None` on EOF or a corrupt/zero header (end of valid data).
+  fn read_header_at(&self, offset: u64) -> Result<Option<FrameHeader>> {
+    match &self.inner {
+      ReadDescriptorInner::Io(file) => {
         let mut hbuf = [0u8; FrameHeader::SIZE];
-        loop {
-          match read_exact_at(file, &mut hbuf, offset) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(Error::Io(e)),
-          }
-          let mut slice = &hbuf[..];
-          let header = match FrameHeader::read(&mut slice) {
-            Ok(h) => h,
-            // Corrupt or zero magic at this offset means we have reached the
-            // end of valid data (or the file is corrupt).
-            Err(_) => return Ok(None),
-          };
-          let end_id = header.start_id + header.entry_count as u64;
-          if target_id >= header.start_id && target_id < end_id {
-            return Ok(Some(FrameLocation { offset, header }));
-          }
-          offset += FrameHeader::SIZE as u64 + header.disk_size as u64;
+        match read_exact_at(file, &mut hbuf, offset) {
+          Ok(()) => {}
+          Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+          Err(e) => return Err(Error::Io(e)),
         }
+        let mut slice = &hbuf[..];
+        Ok(FrameHeader::read(&mut slice).ok())
       }
-      Self::Mmap(mmap) => {
+      ReadDescriptorInner::Mmap(mmap) => {
         let data: &[u8] = mmap;
-        let len = data.len();
-        let mut cursor = 0usize;
-        while cursor + FrameHeader::SIZE <= len {
-          let mut slice = &data[cursor..];
-          let header = match FrameHeader::read(&mut slice) {
-            Ok(h) => h,
-            Err(_) => return Ok(None),
-          };
-          let end_id = header.start_id + header.entry_count as u64;
-          if target_id >= header.start_id && target_id < end_id {
-            return Ok(Some(FrameLocation { offset: cursor as u64, header }));
-          }
-          cursor += FrameHeader::SIZE + header.disk_size as usize;
+        let cursor = offset as usize;
+        if cursor + FrameHeader::SIZE > data.len() {
+          return Ok(None);
         }
-        Ok(None)
+        let mut slice = &data[cursor..];
+        Ok(FrameHeader::read(&mut slice).ok())
       }
+    }
+  }
+
+  /// Returns the frame index, building it with a single sequential header
+  /// scan on first use. Two racing threads may both build; the first insert
+  /// wins and both results are identical (the file is immutable).
+  fn frame_index(&self) -> Result<&[(u64, u64)]> {
+    if let Some(index) = self.frame_index.get() {
+      return Ok(index);
+    }
+
+    let mut entries = Vec::new();
+    let mut offset = 0u64;
+    while let Some(header) = self.read_header_at(offset)? {
+      entries.push((header.start_id, offset));
+      offset += FrameHeader::SIZE as u64 + header.disk_size as u64;
+    }
+
+    let built = entries.into_boxed_slice();
+    Ok(self.frame_index.get_or_init(|| built))
+  }
+
+  /// Locates the frame containing `target_id` via binary search over the
+  /// frame index. Safe to call concurrently on the same descriptor instance.
+  pub fn find_frame(&self, target_id: u64) -> Result<Option<FrameLocation>> {
+    let index = self.frame_index()?;
+
+    // Last frame whose start_id <= target_id.
+    let pos = index.partition_point(|&(start_id, _)| start_id <= target_id);
+    if pos == 0 {
+      return Ok(None);
+    }
+    let (_, offset) = index[pos - 1];
+
+    let header = match self.read_header_at(offset)? {
+      Some(h) => h,
+      None => return Ok(None),
+    };
+    let end_id = header.start_id + header.entry_count as u64;
+    if target_id >= header.start_id && target_id < end_id {
+      Ok(Some(FrameLocation { offset, header }))
+    } else {
+      Ok(None)
     }
   }
 
   /// Reads, CRC-validates, and decompresses the payload identified by `loc`.
   /// Entirely stateless — safe to call concurrently on the same descriptor instance.
   pub fn read_frame(&self, loc: &FrameLocation) -> Result<Vec<Vec<u8>>> {
-    match self {
-      Self::Io(file) => {
+    match &self.inner {
+      ReadDescriptorInner::Io(file) => {
         let payload_offset = loc.offset + FrameHeader::SIZE as u64;
         let mut payload = vec![0u8; loc.header.disk_size as usize];
         read_exact_at(file, &mut payload, payload_offset).map_err(Error::Io)?;
@@ -677,7 +773,7 @@ impl CachedReadDescriptor {
         let final_data = decompress(loc.header.frame_type, &payload, loc.header.uncompressed_size)?;
         Ok(deserialize_batch(&final_data)?)
       }
-      Self::Mmap(mmap) => {
+      ReadDescriptorInner::Mmap(mmap) => {
         let data: &[u8] = mmap;
         let start = loc.offset as usize + FrameHeader::SIZE;
         let end = start + loc.header.disk_size as usize;

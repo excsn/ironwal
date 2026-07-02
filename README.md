@@ -6,42 +6,6 @@
 
 IronWal is a high-durability, deterministic Write-Ahead Log (WAL) designed for systems of record, such as financial ledgers, game state synchronization, and event stores. It prioritizes data integrity, precise replication control, and predictable resource usage over raw, unsafe throughput, providing a robust foundation for building crash-safe applications.
 
-## Key Features
-
-### Deterministic Storage
-Stream keys map explicitly to physical directories on disk. This deterministic structure simplifies external backups, replication strategies, and manual auditing of the log files.
-
-### Data Integrity & Safety
-Every frame written to disk is protected by a CRC32 checksum to detect bit rot and disk corruption. The library includes a rigorous recovery system capable of handling partial writes, power failures, and corrupted indices without data loss.
-
-### Hybrid Compression
-To balance storage efficiency and latency, IronWal employs a hybrid compression strategy. Frames can be stored as raw binary or compressed using the LZ4 format, automatically decided based on configurable size thresholds.
-
-### Fine-Grained Concurrency
-Writes are managed via a sharded locking strategy (`StreamStateMap`), ensuring that appending data to one stream never blocks writers operating on different streams. This allows the system to scale throughput linearly with thread count.
-
-### Resource Protection
-The library utilizes a strictly managed LRU cache for open file descriptors (`fibre_cache`). This prevents the application from exhausting system file handle limits, even when managing thousands of active streams.
-
-### Tunable Durability
-Developers can choose between three synchronization modes: `Strict` (fsync on every write), `BatchOnly` (fsync only on batches/transactions), and `Async` (rely on OS page cache), allowing for precise trade-offs between latency and safety.
-
-### Horizontal Sharding (Optional)
-For applications requiring horizontal scaling, IronWal provides an optional `ShardedWal` extension that automatically routes writes to independent shards based on key hashing. This enables:
-- **Linear throughput scaling** with shard count
-- **Consistent checkpointing** across all shards for snapshot isolation
-- **User-addressable snapshots** (Raft indices, transaction IDs, ULIDs)
-- **Efficient pruning** of historical data before checkpoint boundaries
-
-Enable with the `sharded` feature:
-```toml
-[dependencies]
-ironwal = { version = "0.6.0", features = ["sharded"] }
-```
-## Notable Users
-
-[Hi Stakes Markets Game](https://www.histakesgame.com) -  The worlds most advanced financial simulator, available on iPhone and Android.
-
 ## Installation
 
 Add `ironwal` to your `Cargo.toml` dependencies:
@@ -51,38 +15,101 @@ Add `ironwal` to your `Cargo.toml` dependencies:
 ironwal = "0.6"
 ```
 
-To enable LZ4 compression support (recommended), ensure the default features are active or explicitly enable `compression`:
+LZ4 compression support is included in the default features. To be explicit:
 
 ```toml
 [dependencies]
 ironwal = { version = "0.6", features = ["compression"] }
 ```
 
-## Sharded WAL Example
+## Quick Start
+
+The core type is `Wal`: you append binary entries to named **streams** and read them back by ID or by iteration.
+
+```rust
+use ironwal::{Wal, WalOptions};
+
+fn main() -> ironwal::Result<()> {
+    // All data lives under this directory, one subdirectory per stream.
+    let wal = Wal::new(WalOptions::new("./my_wal_data"))?;
+
+    // Append an entry; it is assigned a monotonically increasing ID.
+    let id = wal.append("orders", b"order_created")?;
+
+    // Random access by ID...
+    let entry = wal.get("orders", id)?;
+
+    // ...or sequential scans from any starting ID.
+    for entry in wal.iter("orders", 0)? {
+        let data = entry?;
+        // process data...
+    }
+
+    Ok(())
+}
+```
+
+Atomic batch writes (`append_batch`, `TxnWriter`) and disk reclamation (`truncate`) are covered in the **[Usage Guide](README.USAGE.md)**.
+
+## Core Concepts
+
+* **Stream** — an independent, append-only sequence of records, addressed by name. Each stream maps to its own directory on disk.
+* **Entry** — a single binary record. Every entry in a stream gets a monotonically increasing 64-bit sequence ID.
+* **Segment** — streams are stored as segment files that rotate automatically at configurable size/count thresholds. Truncation reclaims disk space by deleting whole segments below a safe ID.
+
+## Key Features
+
+### Deterministic Storage
+Stream names map explicitly to physical directories on disk. This deterministic structure simplifies external backups, replication strategies, and manual auditing of the log files.
+
+### Data Integrity & Safety
+Every frame written to disk is protected by a CRC32 checksum to detect bit rot and disk corruption. The library includes a rigorous recovery system capable of handling partial writes, power failures, and corrupted indices without data loss.
+
+### Hybrid Compression
+To balance storage efficiency and latency, IronWal employs a hybrid compression strategy. Frames can be stored as raw binary or compressed using the LZ4 format, automatically decided based on configurable size thresholds.
+
+### Per-Stream Concurrency
+`Wal` is cheaply cloneable and thread-safe. Locking is per stream, so appending to one stream never blocks writers on other streams — throughput scales with the number of independent streams being written.
+
+### Resource Protection
+Open file descriptors are held in bounded LRU caches, for both writing and reading. This prevents the application from exhausting system file handle limits, even when managing thousands of active streams.
+
+### Tunable Durability
+Developers can choose between three synchronization modes: `Strict` (fsync on every write), `BatchOnly` (fsync only on batches/transactions), and `Async` (rely on OS page cache), allowing for precise trade-offs between latency and safety.
+
+## Sharded WAL (optional `sharded` feature)
+
+Everything above is the core, always-available API. For write volumes beyond what a single stream can absorb, the optional `ShardedWal` builds on top of `Wal`: it partitions writes across a fixed number of internal streams (`shard_00`, `shard_01`, …) by hashing a key you supply. The key only routes the write — it is not stored — and each entry is addressed by `(shard_id, seq_id)`. On top of this partitioning, `ShardedWal` adds **checkpoints** — a consistent cut of every shard's durable offset, tagged with an ID you choose (a Raft index, transaction ID, ULID, …) — and **pruning** of segments older than a checkpoint.
+
+Note that this is a different mechanism from the per-stream concurrency above: the core `Wal` already lets independent streams proceed in parallel. Reach for `ShardedWal` only when the throughput of a *single* logical stream is the bottleneck. In exchange you give up per-key `get` (reads are per-shard iteration), atomicity of batches that span shards, and the ability to change the shard count without a migration.
+
+```toml
+[dependencies]
+ironwal = { version = "0.6", features = ["sharded"] }
+```
+
 ```rust
 use ironwal::sharded::ShardedWal;
 use ironwal::WalOptions;
 
-// Create a sharded WAL with 16 independent shards
-let wal = ShardedWal::new(WalOptions::default(), 16)?;
+// 16 shards, fixed at creation.
+let wal = ShardedWal::new(WalOptions::new("./data"), 16)?;
 
-// Writes are automatically routed by key hash
+// The key picks the shard; it is not stored with the entry.
 let (shard_id, seq_id) = wal.append(b"user_123", b"profile_data")?;
 
-// Create a consistent snapshot across all shards
-wal.create_checkpoint(b"snapshot_v1")?;
+// Record every shard's durable offset under an ID you choose.
+wal.create_checkpoint(b"raft_index_5000")?;
 
-// Restore from checkpoint
-let (checkpoint_id, data) = wal.load_latest_checkpoint()?;
-for shard_id in 0..16 {
-    let offset = data.offsets[shard_id as usize];
-    let mut iter = wal.iter_shard(shard_id, offset)?;
-    // Process entries from this shard...
-}
-
-// Prune old data before checkpoint
-wal.prune_before_checkpoint(b"snapshot_v1")?;
+// Reclaim disk space for segments entirely before that checkpoint.
+wal.prune_before_checkpoint(b"raft_index_5000")?;
 ```
+
+Restoring from checkpoints, batch writes, durability caveats under `BatchOnly`/`Async`, and shard-count sizing are covered in the [Usage Guide](README.USAGE.md#sharded-wal-optional-feature).
+
+## Notable Users
+
+[Hi Stakes Markets Game](https://www.histakesgame.com) -  The worlds most advanced financial simulator, available on iPhone and Android.
 
 ## Documentation
 
