@@ -164,14 +164,36 @@ impl CheckpointEntry {
   /// - Payload is malformed
   /// - Reader encounters EOF
   pub fn deserialize<R: Read>(reader: &mut R, file_offset: u64) -> Result<(Self, u64)> {
-    // 1. Read and validate MAGIC
+    // 1. Read and validate MAGIC. EOF before any MAGIC byte is the normal
+    //    end-of-log boundary and must stay an Io error so callers can
+    //    distinguish it from corruption; a partial MAGIC is a torn entry.
     let mut magic = [0u8; 4];
-    reader
-      .read_exact(&mut magic)
-      .map_err(|e| Error::CheckpointCorrupted {
-        offset: file_offset,
-        reason: format!("Failed to read MAGIC: {}", e),
-      })?;
+    let mut filled = 0;
+    while filled < magic.len() {
+      match reader.read(&mut magic[filled..]) {
+        Ok(0) if filled == 0 => {
+          return Err(Error::Io(std::io::ErrorKind::UnexpectedEof.into()));
+        }
+        Ok(0) => {
+          return Err(Error::CheckpointCorrupted {
+            offset: file_offset,
+            reason: format!(
+              "Torn entry header: only {} of {} MAGIC bytes present",
+              filled,
+              magic.len()
+            ),
+          });
+        }
+        Ok(n) => filled += n,
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+        Err(e) => {
+          return Err(Error::CheckpointCorrupted {
+            offset: file_offset,
+            reason: format!("Failed to read MAGIC: {}", e),
+          });
+        }
+      }
+    }
 
     if &magic != MAGIC {
       return Err(Error::CheckpointCorrupted {
@@ -484,6 +506,37 @@ mod tests {
     let result = CheckpointEntry::deserialize(&mut cursor, 0);
 
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_clean_eof_is_io_not_corruption() {
+    // A reader positioned exactly at end-of-log (0 bytes left) is the normal
+    // termination case for the index rebuild scan. It must surface as
+    // Error::Io(UnexpectedEof) so rebuild_from_log's EOF arm handles it
+    // silently — NOT as CheckpointCorrupted, which logs a spurious warning
+    // on every startup.
+    let mut cursor = Cursor::new(&[] as &[u8]);
+    let result = CheckpointEntry::deserialize(&mut cursor, 507);
+
+    match result {
+      Err(Error::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
+      Err(other) => panic!("expected Error::Io(UnexpectedEof), got: {}", other),
+      Ok(_) => panic!("expected error at EOF"),
+    }
+  }
+
+  #[test]
+  fn test_torn_magic_is_corruption() {
+    // A partial MAGIC (1-3 bytes then EOF) is a genuinely torn entry and
+    // must still be reported as corruption.
+    let mut cursor = Cursor::new(&MAGIC[..2]);
+    let result = CheckpointEntry::deserialize(&mut cursor, 100);
+
+    match result {
+      Err(Error::CheckpointCorrupted { offset, .. }) => assert_eq!(offset, 100),
+      Err(other) => panic!("expected CheckpointCorrupted, got: {}", other),
+      Ok(_) => panic!("expected error on torn MAGIC"),
+    }
   }
 
   #[test]
