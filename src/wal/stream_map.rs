@@ -62,6 +62,15 @@ impl StreamStateMap {
     map.get(key).cloned()
   }
 
+  /// Removes every entry whose key matches the predicate, returning the
+  /// removed states. Holds the map write lock for the whole sweep so no
+  /// concurrent `get_or_create` can hand out a doomed handle mid-removal.
+  pub fn remove_matching(&self, mut pred: impl FnMut(&str) -> bool) -> Vec<Arc<Mutex<StreamState>>> {
+    let mut map = self.inner.write();
+    let keys: Vec<String> = map.keys().filter(|k| pred(k)).cloned().collect();
+    keys.iter().filter_map(|k| map.remove(k)).collect()
+  }
+
   /// Helper to check existence without cloning the Arc.
   pub fn contains(&self, key: &str) -> bool {
     let map = self.inner.read();

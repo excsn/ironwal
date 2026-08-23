@@ -329,6 +329,24 @@ impl ShardedWal {
     self.inner.iter(&stream, start_offset)
   }
 
+  /// Like [`ShardedWal::iter_shard`], but yields `(seq_id, entry)` pairs.
+  pub fn iter_shard_with_ids(
+    &self,
+    shard_id: u16,
+    start_offset: u64,
+  ) -> Result<crate::iter::WalIdIterator> {
+    if shard_id >= self.router.shard_count() {
+      return Err(Error::Config(format!(
+        "Invalid shard_id: {} (max: {})",
+        shard_id,
+        self.router.shard_count() - 1
+      )));
+    }
+
+    let stream = self.router.shard_name(shard_id);
+    self.inner.iter_with_ids(&stream, start_offset)
+  }
+
   /// Prunes all shards to the offsets specified in a checkpoint.
   ///
   /// This deletes segment files containing data strictly before the checkpoint.

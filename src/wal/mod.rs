@@ -10,6 +10,7 @@ use std::sync::Arc;
 use byteorder::{LittleEndian, WriteBytesExt};
 use fibre_cache::policy::lru::LruPolicy;
 use fibre_cache::{Cache, CacheBuilder, EvictionListener, EvictionReason};
+use parking_lot::RwLock;
 use tracing::error;
 
 use crate::batch::TxnWriter;
@@ -59,9 +60,28 @@ pub struct WalState {
   /// entry; this is intentionally benign — both opens are read-only and the
   /// last writer simply overwrites with an equivalent descriptor.
   read_descriptor_cache: Cache<PathBuf, CachedReadDescriptor>,
+
+  /// Per-stream generation counters, bumped by [`Wal::delete_stream`] and
+  /// folded into the block cache hash. A recreated stream regenerates
+  /// identical `(segment_start_id, frame_offset)` pairs, so without the salt
+  /// the block cache would serve blocks from the deleted incarnation.
+  stream_generations: RwLock<HashMap<PathBuf, u64>>,
 }
 
 impl WalState {
+  fn stream_cache_hash(&self, stream: &str, stream_dir: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    stream.hash(&mut hasher);
+    let generation = self
+      .stream_generations
+      .read()
+      .get(stream_dir)
+      .copied()
+      .unwrap_or(0);
+    generation.hash(&mut hasher);
+    hasher.finish()
+  }
+
   fn get_or_create_segment(
     &self,
     stream: &str,
@@ -331,6 +351,7 @@ impl Wal {
         write_cache,
         read_cache,
         read_descriptor_cache,
+        stream_generations: RwLock::new(HashMap::new()),
       }),
     })
   }
@@ -368,6 +389,11 @@ impl Wal {
   /// `safe_id` passed to the last truncation) to read the remaining history.
   pub fn iter(&self, stream: &str, start_id: u64) -> Result<crate::iter::WalIterator> {
     crate::iter::WalIterator::new(self.clone(), stream.to_string(), start_id)
+  }
+
+  /// Like [`Wal::iter`], but yields `(id, entry)` pairs.
+  pub fn iter_with_ids(&self, stream: &str, start_id: u64) -> Result<crate::iter::WalIdIterator> {
+    crate::iter::WalIdIterator::new(self.clone(), stream.to_string(), start_id)
   }
 
   // Helper for Iterator to resolve paths (since fields are private/wrapped)
@@ -412,6 +438,14 @@ impl Wal {
       if entry.file_type()?.is_dir() {
         let stream_key = entry.file_name().to_string_lossy().to_string();
         let stream_dir = entry.path();
+
+        if stream_key.ends_with(util::DELETE_MARKER_SUFFIX) {
+          // Leftover from a delete_stream interrupted by a crash.
+          if let Err(e) = fs::remove_dir_all(&stream_dir) {
+            tracing::warn!(target: "ironwal", "Failed to remove delete marker {}: {}", stream_dir.display(), e);
+          }
+          continue;
+        }
 
         if let Some(state) = Self::recover_stream(&stream_dir, options, index_cache)? {
           streams.insert(stream_key, state);
@@ -590,7 +624,13 @@ impl Wal {
       if let Some(idx) = self.inner.index_cache.fetch(&idx_path) {
         idx
       } else {
-        let idx = SegmentIndex::open(&stream_dir)?;
+        // A missing index means the stream doesn't exist (never written, or
+        // removed by delete_stream).
+        let idx = match SegmentIndex::open(&stream_dir) {
+          Ok(idx) => idx,
+          Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+          Err(e) => return Err(e),
+        };
         self.inner.index_cache.insert(idx_path.clone(), idx, 1);
         self.inner.index_cache.fetch(&idx_path).unwrap()
       }
@@ -604,9 +644,7 @@ impl Wal {
     }
 
     // 2. Compute stream hash once (used for the block cache key in both paths).
-    let mut hasher = DefaultHasher::new();
-    stream.hash(&mut hasher);
-    let stream_hash = hasher.finish();
+    let stream_hash = self.inner.stream_cache_hash(stream, &stream_dir);
 
     // 3. Determine whether the target segment is still being actively written to.
     //    Active segments bypass the read descriptor cache to avoid SIGBUS and
@@ -720,15 +758,21 @@ impl Wal {
     let index = if let Some(idx) = self.inner.index_cache.fetch(&idx_path) {
       idx
     } else {
-      let idx = SegmentIndex::open(&stream_dir)?;
+      // A missing index means the stream doesn't exist (never written, or
+      // removed by delete_stream).
+      let idx = match SegmentIndex::open(&stream_dir) {
+        Ok(idx) => idx,
+        Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
+          return Ok(vec![None; ids.len()]);
+        }
+        Err(e) => return Err(e),
+      };
       self.inner.index_cache.insert(idx_path.clone(), idx, 1);
       self.inner.index_cache.fetch(&idx_path).unwrap()
     };
 
     // Pre-compute stream hash (same for every entry in this call).
-    let mut hasher = DefaultHasher::new();
-    stream.hash(&mut hasher);
-    let stream_hash = hasher.finish();
+    let stream_hash = self.inner.stream_cache_hash(stream, &stream_dir);
 
     // Obtain the active segment ID once.  A rotation that occurs mid-loop is
     // safe: the reader opens an immutable file that simply stopped growing.
@@ -947,6 +991,68 @@ impl Wal {
     }
 
     Ok(deleted_ids.len())
+  }
+
+  /// Removes a stream entirely: all segment files, `segments.idx`, the head
+  /// state file and the in-memory stream state. A subsequent append recreates
+  /// the stream starting from ID 0. Idempotent: deleting a stream that does
+  /// not exist is a no-op.
+  ///
+  /// Safe on a live `Wal` with respect to readers and other streams. An
+  /// append to the same stream racing this call may recreate the stream
+  /// mid-deletion; stop appending to the stream before deleting it.
+  ///
+  /// Crash-safe: the stream directory is atomically renamed to a marker name
+  /// before removal, and leftover markers are cleaned up by [`Wal::new`].
+  pub fn delete_stream(&self, stream: &str) -> Result<()> {
+    let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
+
+    // Remove every map entry aliasing to this directory (keys are raw stream
+    // names, several of which may sanitize to the same path), then wait out
+    // in-flight appends by locking the removed states for the whole deletion.
+    let removed = self.inner.streams.remove_matching(|key| {
+      util::ensure_safe_path(&self.inner.options.root_path, key).map_or(false, |dir| dir == stream_dir)
+    });
+    let _guards: Vec<_> = removed.iter().map(|state| state.lock()).collect();
+
+    {
+      let mut generations = self.inner.stream_generations.write();
+      *generations.entry(stream_dir.clone()).or_insert(0) += 1;
+    }
+
+    self
+      .inner
+      .index_cache
+      .invalidate(&stream_dir.join(SegmentIndex::FILENAME));
+
+    if !stream_dir.exists() {
+      return Ok(());
+    }
+
+    for entry in fs::read_dir(&stream_dir)? {
+      let entry = entry?;
+      let filename = entry.file_name().to_string_lossy().to_string();
+      if util::parse_segment_id(&filename).is_some() {
+        let path = entry.path();
+        self.inner.write_cache.invalidate(&path);
+        self.inner.read_descriptor_cache.invalidate(&path);
+      }
+    }
+
+    let marker = {
+      let mut name = stream_dir.file_name().unwrap_or_default().to_os_string();
+      name.push(util::DELETE_MARKER_SUFFIX);
+      stream_dir.with_file_name(name)
+    };
+    if marker.exists() {
+      fs::remove_dir_all(&marker)?;
+    }
+    fs::rename(&stream_dir, &marker)?;
+    let root = fs::File::open(&self.inner.options.root_path)?;
+    root.sync_all()?;
+    fs::remove_dir_all(&marker)?;
+
+    Ok(())
   }
 
   /// Gets the current state of a stream (for watermark initialization).

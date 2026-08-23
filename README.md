@@ -49,7 +49,7 @@ fn main() -> ironwal::Result<()> {
 }
 ```
 
-Atomic batch writes (`append_batch`, `TxnWriter`) and disk reclamation (`truncate`) are covered in the **[Usage Guide](README.USAGE.md)**.
+Atomic batch writes (`append_batch`, `TxnWriter`) and disk reclamation (`truncate`, `delete_stream`) are covered in the **[Usage Guide](README.USAGE.md)**.
 
 ## Core Concepts
 

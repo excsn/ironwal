@@ -92,3 +92,99 @@ fn test_iter_empty_stream() {
   let mut iter = env.wal.iter("non_existent", 0).unwrap();
   assert!(iter.next().is_none());
 }
+
+#[test]
+fn test_iter_with_ids_sequential() {
+  let env = TestEnv::with_default();
+  let stream = "iter_ids_seq";
+
+  for i in 0..100 {
+    let payload = format!("val_{}", i).into_bytes();
+    env.wal.append(stream, &payload).unwrap();
+  }
+
+  let mut iter = env.wal.iter_with_ids(stream, 0).unwrap();
+
+  for i in 0..100u64 {
+    let (id, entry) = iter.next().expect("Iterator finished early").unwrap();
+    assert_eq!(id, i);
+    assert_eq!(entry, format!("val_{}", i).into_bytes());
+  }
+
+  assert!(iter.next().is_none());
+}
+
+#[test]
+fn test_iter_with_ids_mid_batch_seek() {
+  let env = TestEnv::with_default();
+  let stream = "iter_ids_mid_seek";
+
+  let batch: Vec<Vec<u8>> = (0..10).map(|i| vec![i as u8]).collect();
+  let batch_refs: Vec<&[u8]> = batch.iter().map(|v| v.as_slice()).collect();
+  env.wal.append_batch(stream, &batch_refs).unwrap();
+
+  let mut iter = env.wal.iter_with_ids(stream, 5).unwrap();
+
+  for i in 5..10u64 {
+    let (id, entry) = iter.next().expect("Iterator early stop").unwrap();
+    assert_eq!(id, i);
+    assert_eq!(entry, vec![i as u8]);
+  }
+
+  assert!(iter.next().is_none());
+}
+
+#[test]
+fn test_iter_with_ids_segment_crossing() {
+  let mut opts = WalOptions::default();
+  opts.max_segment_size = 500;
+  let env = TestEnv::new(opts);
+  let stream = "iter_ids_cross";
+
+  for i in 0..20 {
+    env.wal.append(stream, &vec![i as u8; 100]).unwrap();
+  }
+
+  let mut iter = env.wal.iter_with_ids(stream, 10).unwrap();
+
+  for i in 10..20u64 {
+    let (id, entry) = iter.next().expect("Iterator stopped early").unwrap();
+    assert_eq!(id, i);
+    assert_eq!(entry, vec![i as u8; 100]);
+  }
+
+  assert!(iter.next().is_none());
+}
+
+#[test]
+fn test_iter_with_ids_after_truncate() {
+  let mut opts = WalOptions::default();
+  opts.max_segment_size = u64::MAX;
+  opts.max_entries_per_segment = 10;
+  let env = TestEnv::new(opts);
+  let stream = "iter_ids_truncate";
+
+  for i in 0..30u8 {
+    env.wal.append(stream, &[i]).unwrap();
+  }
+
+  env.wal.truncate(stream, 15).unwrap();
+
+  // Segment 0 is gone; iterate from the first surviving segment.
+  let mut iter = env.wal.iter_with_ids(stream, 10).unwrap();
+
+  for i in 10..30u64 {
+    let (id, entry) = iter.next().expect("Iterator stopped early").unwrap();
+    assert_eq!(id, i);
+    assert_eq!(entry, vec![i as u8]);
+  }
+
+  assert!(iter.next().is_none());
+}
+
+#[test]
+fn test_iter_with_ids_empty_stream() {
+  let env = TestEnv::with_default();
+  let mut iter = env.wal.iter_with_ids("non_existent", 0).unwrap();
+  assert!(iter.next().is_none());
+}

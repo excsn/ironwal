@@ -72,11 +72,17 @@ The primary interface for the library.
 *   `pub fn writer(&self, stream: &str) -> TxnWriter`
     *   Creates a transaction writer for buffering appends in memory.
 *   `pub fn get(&self, stream: &str, id: u64) -> Result<Option<Vec<u8>>>`
-    *   Retrieves a specific entry by ID. Returns `None` if not found.
+    *   Retrieves a specific entry by ID. Returns `None` if the ID is not found, has been truncated or the stream does not exist.
+*   `pub fn get_batch(&self, stream: &str, ids: &[u64]) -> Result<Vec<Option<Vec<u8>>>>`
+    *   Retrieves multiple entries in one call, grouped by segment. Results are in input order; missing IDs (and a missing stream) yield `None`.
 *   `pub fn iter(&self, stream: &str, start_id: u64) -> Result<WalIterator>`
     *   Returns an iterator over entries starting from `start_id`.
+*   `pub fn iter_with_ids(&self, stream: &str, start_id: u64) -> Result<WalIdIterator>`
+    *   Like `iter`, but yields `(id, entry)` pairs.
 *   `pub fn truncate(&self, stream: &str, safe_id: u64) -> Result<usize>`
-    *   Deletes segments containing only records older than `safe_id`. Returns count of deleted segments.
+    *   Deletes segments containing only records older than `safe_id`. Returns count of deleted segments. Never deletes the active segment.
+*   `pub fn delete_stream(&self, stream: &str) -> Result<()>`
+    *   Removes a stream entirely: all segment files, its index and its in-memory state. A subsequent append recreates the stream starting from ID 0. Idempotent; crash-safe (an interrupted delete is completed on the next `Wal::new`). Stop appending to the stream before calling; a racing append may recreate the stream mid-deletion.
 *   `pub fn current_segment_start_id(&self, stream: &str) -> Option<u64>`
     *   Returns the start ID of the active segment file (useful for monitoring).
 
@@ -91,6 +97,12 @@ Helper for building batches in memory.
 
 ### `struct WalIterator`
 Iterator for sequential reads. Implements `Iterator<Item = Result<Vec<u8>>>`.
+
+**Methods:**
+*   (Standard Iterator methods like `next()`).
+
+### `struct WalIdIterator`
+Iterator for sequential reads carrying sequence IDs. Implements `Iterator<Item = Result<(u64, Vec<u8>)>>`.
 
 **Methods:**
 *   (Standard Iterator methods like `next()`).
@@ -150,6 +162,9 @@ A horizontal sharding wrapper around `Wal` with consistent checkpointing.
 *   `pub fn iter_shard(&self, shard_id: u16, start_offset: u64) -> Result<WalIterator>`
     *   Returns an iterator for a specific shard starting at `start_offset`.
     *   This is the primary way to read data from a sharded WAL.
+*   `pub fn iter_shard_with_ids(&self, shard_id: u16, start_offset: u64) -> Result<WalIdIterator>`
+    *   Like `iter_shard`, but yields `(seq_id, entry)` pairs.
+    *   Returns `Error::Config` if `shard_id >= shard_count`.
 
 **Maintenance:**
 *   `pub fn prune_before_checkpoint(&self, user_id: &[u8]) -> Result<PruneStats>`

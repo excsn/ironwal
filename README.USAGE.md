@@ -103,9 +103,20 @@ The primary entry point for writing is the `Wal` struct. Writes are thread-safe 
 IronWal supports both random access and sequential scanning.
 
 *   `fn get(&self, stream: &str, id: u64) -> Result<Option<Vec<u8>>>`
-    *   Retrieves a specific entry by its ID. Returns `None` if the ID does not exist or has been truncated.
+    *   Retrieves a specific entry by its ID. Returns `None` if the ID does not exist, has been truncated or the stream does not exist.
+*   `fn get_batch(&self, stream: &str, ids: &[u64]) -> Result<Vec<Option<Vec<u8>>>>`
+    *   Retrieves multiple entries in one call. Significantly cheaper than repeated `get` calls under the `StandardIo` read strategy.
 *   `fn iter(&self, stream: &str, start_id: u64) -> Result<WalIterator>`
     *   Returns an iterator that yields entries sequentially starting from `start_id`. It seamlessly handles crossing segment file boundaries.
+*   `fn iter_with_ids(&self, stream: &str, start_id: u64) -> Result<WalIdIterator>`
+    *   The same scan, but yielding `(id, entry)` pairs. Use this when consumers need to track their position in the stream.
+
+```rust
+for entry in wal.iter_with_ids("logs", 0)? {
+    let (id, data) = entry?;
+    println!("{}: {} bytes", id, data.len());
+}
+```
 
 ### Maintenance and Truncation
 
@@ -113,6 +124,16 @@ To manage disk usage, you can prune old data that has already been processed or 
 
 *   `fn truncate(&self, stream: &str, safe_id: u64) -> Result<usize>`
     *   Deletes all segment files where *all* contained records have IDs strictly less than `safe_id`. This method guarantees that the active segment is never deleted, ensuring writer safety. Returns the number of deleted files.
+*   `fn delete_stream(&self, stream: &str) -> Result<()>`
+    *   Removes a stream entirely, including its active segment and in-memory state. Unlike `truncate`, sequence IDs restart: the next append to that name creates a fresh stream at ID 0. The call is idempotent and crash-safe; an interrupted delete is finished on the next `Wal::new`. Stop appending to the stream before deleting it, since a racing append may recreate the stream mid-deletion.
+
+```rust
+wal.delete_stream("session_scratch")?;
+
+// The name is reusable immediately; IDs restart at 0.
+let id = wal.append("session_scratch", b"fresh start")?;
+assert_eq!(id, 0);
+```
 
 ## Sharded WAL (Optional Feature)
 
@@ -283,6 +304,15 @@ for shard_id in 0..wal.shard_count() {
         let data = entry?;
         process_entry(shard_id, data)?;
     }
+}
+```
+
+To track consumption offsets while reading, `iter_shard_with_ids` yields `(seq_id, entry)` pairs instead:
+
+```rust
+for entry in wal.iter_shard_with_ids(shard_id, offset)? {
+    let (seq_id, data) = entry?;
+    process_entry(shard_id, seq_id, data)?;
 }
 ```
 

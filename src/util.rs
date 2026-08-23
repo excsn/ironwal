@@ -1,6 +1,11 @@
 use crate::error::{Error, Result};
 use std::path::{Component, Path, PathBuf};
 
+/// Suffix a stream directory is renamed to before deletion. `#` is outside
+/// the output alphabet of `sanitize_stream_key`, so no live stream directory
+/// can collide with a marker.
+pub const DELETE_MARKER_SUFFIX: &str = "#deleted";
+
 /// Sanitizes a stream key to ensure it is safe for use as a directory name.
 /// Replaces potentially dangerous characters with underscores.
 pub fn sanitize_stream_key(key: &str) -> Result<String> {

@@ -37,6 +37,51 @@ fn test_append_and_iter_basic() {
 }
 
 #[test]
+fn test_iter_shard_with_ids() {
+  let (wal, _dir) = setup(4);
+
+  let mut expected: Vec<Vec<(u64, Vec<u8>)>> = vec![Vec::new(); 4];
+  for i in 0..100 {
+    let key = format!("key_{}", i);
+    let value = format!("value_{}", i).into_bytes();
+    let (shard_id, seq_id) = wal.append(key.as_bytes(), &value).unwrap();
+    expected[shard_id as usize].push((seq_id, value));
+  }
+
+  for shard_id in 0..4u16 {
+    let read: Vec<(u64, Vec<u8>)> = wal
+      .iter_shard_with_ids(shard_id, 0)
+      .unwrap()
+      .collect::<ironwal::Result<_>>()
+      .unwrap();
+    assert_eq!(read, expected[shard_id as usize]);
+  }
+}
+
+#[test]
+fn test_iter_shard_with_ids_from_offset() {
+  let (wal, _dir) = setup(1);
+
+  for i in 0..20u8 {
+    wal.append(b"same_key", &[i]).unwrap();
+  }
+
+  let read: Vec<(u64, Vec<u8>)> = wal
+    .iter_shard_with_ids(0, 15)
+    .unwrap()
+    .collect::<ironwal::Result<_>>()
+    .unwrap();
+  let expected: Vec<(u64, Vec<u8>)> = (15..20).map(|i| (i as u64, vec![i as u8])).collect();
+  assert_eq!(read, expected);
+}
+
+#[test]
+fn test_iter_shard_with_ids_invalid_shard() {
+  let (wal, _dir) = setup(4);
+  assert!(wal.iter_shard_with_ids(4, 0).is_err());
+}
+
+#[test]
 fn test_deterministic_routing() {
   let (wal, _dir) = setup(16);
 

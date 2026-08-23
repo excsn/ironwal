@@ -124,17 +124,14 @@ impl WalIterator {
 
     Ok(false)
   }
-}
 
-impl Iterator for WalIterator {
-  type Item = Result<Vec<u8>>;
-
-  fn next(&mut self) -> Option<Self::Item> {
+  fn next_entry(&mut self) -> Option<Result<(u64, Vec<u8>)>> {
     loop {
       // 1. Try to yield from buffer
       if let Some(entry) = self.buffer.pop_front() {
+        let id = self.next_id;
         self.next_id += 1;
-        return Some(Ok(entry));
+        return Some(Ok((id, entry)));
       }
 
       // 2. Refill Buffer
@@ -189,5 +186,34 @@ impl Iterator for WalIterator {
         Err(e) => return Some(Err(e)),
       }
     }
+  }
+}
+
+impl Iterator for WalIterator {
+  type Item = Result<Vec<u8>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.next_entry().map(|r| r.map(|(_, entry)| entry))
+  }
+}
+
+/// Like [`WalIterator`], but yields `(id, entry)` pairs.
+pub struct WalIdIterator {
+  inner: WalIterator,
+}
+
+impl WalIdIterator {
+  pub(crate) fn new(wal: Wal, stream: String, start_id: u64) -> Result<Self> {
+    Ok(Self {
+      inner: WalIterator::new(wal, stream, start_id)?,
+    })
+  }
+}
+
+impl Iterator for WalIdIterator {
+  type Item = Result<(u64, Vec<u8>)>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next_entry()
   }
 }
