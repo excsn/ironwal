@@ -883,10 +883,12 @@ impl Wal {
 
   // --- Maintenance ---
 
-  /// Truncates the stream's history, deleting all segment files containing
-  /// records with IDs strictly less than `safe_id`.
+  /// Truncates the stream's history, freeing all segment files containing
+  /// records with IDs strictly less than `safe_id`. With `archive_path` set the
+  /// files move to `{archive_path}/{stream}/` instead of being deleted, and
+  /// [`Wal::restore_archived`] brings them back.
   ///
-  /// Returns the number of segments deleted.
+  /// Returns the number of segments freed.
   pub fn truncate(&self, stream: &str, safe_id: u64) -> Result<usize> {
     let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
     let idx_path = stream_dir.join(SegmentIndex::FILENAME);
@@ -928,8 +930,15 @@ impl Wal {
       return Ok(0);
     }
 
-    // --- Phase 2: Perform Deletion (No Lock) ---
+    // --- Phase 2: Perform Deletion or Archival (No Lock) ---
     let mut deleted_ids = Vec::new();
+    let archive_dir = match self.archive_dir(stream)? {
+      Some(dir) => {
+        fs::create_dir_all(&dir)?;
+        Some(dir)
+      }
+      None => None,
+    };
 
     for &start_id in &to_delete {
       let filename = segment_filename(start_id);
@@ -938,13 +947,17 @@ impl Wal {
       self.inner.write_cache.invalidate(&path);
       self.inner.read_descriptor_cache.invalidate(&path);
 
-      match fs::remove_file(&path) {
+      let freed = match &archive_dir {
+        Some(dir) => move_file(&path, &dir.join(&filename)),
+        None => fs::remove_file(&path),
+      };
+      match freed {
         Ok(_) => deleted_ids.push(start_id),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
           deleted_ids.push(start_id);
         }
         Err(e) => {
-          tracing::warn!(target: "ironwal", "Failed to delete segment {}: {}. It will remain in index.", path.display(), e);
+          tracing::warn!(target: "ironwal", "Failed to free segment {}: {}. It will remain in index.", path.display(), e);
         }
       }
     }
@@ -991,6 +1004,64 @@ impl Wal {
     }
 
     Ok(deleted_ids.len())
+  }
+
+  /// The archive directory for `stream`, when `archive_path` is configured.
+  fn archive_dir(&self, stream: &str) -> Result<Option<PathBuf>> {
+    match &self.inner.options.archive_path {
+      Some(root) => Ok(Some(util::ensure_safe_path(root, stream)?)),
+      None => Ok(None),
+    }
+  }
+
+  /// Moves every segment `truncate` archived for `stream` back into the stream and
+  /// rebuilds `segments.idx` from the segment files present, so the restored history
+  /// reads again from its first ID. Returns the number of segments restored; 0 when
+  /// nothing is archived or no `archive_path` is configured. Idempotent and crash-safe:
+  /// files move one at a time and the index is rewritten last, atomically, from what is
+  /// on disk, so an interrupted restore is completed by running it again. Stop appending
+  /// to the stream before calling.
+  pub fn restore_archived(&self, stream: &str) -> Result<usize> {
+    let Some(archive_dir) = self.archive_dir(stream)? else { return Ok(0) };
+    let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
+    let idx_path = stream_dir.join(SegmentIndex::FILENAME);
+
+    let stream_lock = self.inner.streams.get_or_create(stream);
+    let _state = stream_lock.lock();
+
+    let mut restored = 0usize;
+    if let Ok(entries) = fs::read_dir(&archive_dir) {
+      for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if util::parse_segment_id(name).is_none() {
+          continue;
+        }
+        let target = stream_dir.join(name);
+        self.inner.write_cache.invalidate(&target);
+        self.inner.read_descriptor_cache.invalidate(&target);
+        move_file(&entry.path(), &target)?;
+        restored += 1;
+      }
+    }
+
+    let mut ids: Vec<u64> = fs::read_dir(&stream_dir)?
+      .flatten()
+      .filter_map(|e| e.file_name().to_str().and_then(util::parse_segment_id))
+      .collect();
+    ids.sort_unstable();
+
+    let temp_path = stream_dir.join("segments.idx.tmp");
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(&temp_path)?;
+    for id in ids {
+      file.write_u64::<LittleEndian>(id)?;
+    }
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp_path, &idx_path)?;
+    self.inner.index_cache.invalidate(&idx_path);
+
+    Ok(restored)
   }
 
   /// Removes a stream entirely: all segment files, `segments.idx`, the head
@@ -1076,4 +1147,26 @@ impl Wal {
     }
     Ok(())
   }
+}
+
+/// Rename, falling back to copy-then-remove when the destination sits on another device.
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+  match fs::rename(from, to) {
+    Ok(()) => Ok(()),
+    Err(e) if e.raw_os_error() == Some(libc_exdev()) => {
+      fs::copy(from, to)?;
+      fs::remove_file(from)
+    }
+    Err(e) => Err(e),
+  }
+}
+
+#[cfg(unix)]
+fn libc_exdev() -> i32 {
+  18
+}
+
+#[cfg(not(unix))]
+fn libc_exdev() -> i32 {
+  17
 }

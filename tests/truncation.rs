@@ -84,6 +84,64 @@ fn test_truncate_active_safety() {
 }
 
 #[test]
+fn test_archived_segments_restore_the_history() {
+  let archive = tempfile::tempdir().unwrap();
+  let mut opts = WalOptions::default();
+  opts.max_segment_size = u64::MAX;
+  opts.max_entries_per_segment = 10;
+  opts.archive_path = Some(archive.path().to_path_buf());
+  let env = TestEnv::new(opts.clone());
+  let stream = "truncate_archive";
+
+  for i in 0..30u8 {
+    env.wal.append(stream, &[i]).unwrap();
+  }
+  assert_eq!(env.wal.truncate(stream, 25).unwrap(), 2, "segments 0 and 10 are freed");
+
+  let stream_dir = env.root.join(stream);
+  let archived = archive.path().join(stream);
+  assert!(!stream_dir.join(segment_filename(0)).exists());
+  assert!(!stream_dir.join(segment_filename(10)).exists());
+  assert!(archived.join(segment_filename(0)).exists(), "freed segments moved to the archive");
+  assert!(archived.join(segment_filename(10)).exists());
+  let ids: Vec<u64> = env.wal.iter_with_ids(stream, 0).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (20..30).collect::<Vec<_>>(), "the stream reads as truncated");
+  assert!(env.wal.get(stream, 5).unwrap().is_none());
+
+  assert_eq!(env.wal.restore_archived(stream).unwrap(), 2);
+  assert!(!archived.join(segment_filename(0)).exists(), "the archive is emptied");
+  assert!(stream_dir.join(segment_filename(0)).exists());
+  let ids: Vec<u64> = env.wal.iter_with_ids(stream, 0).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (0..30).collect::<Vec<_>>(), "the whole history reads again");
+  assert_eq!(env.wal.get(stream, 5).unwrap().unwrap(), vec![5u8]);
+  assert_eq!(env.wal.restore_archived(stream).unwrap(), 0, "nothing left to restore");
+
+  // the restored history survives a reopen; appends continue past the active segment
+  let id = env.wal.append(stream, &[30]).unwrap();
+  assert_eq!(id, 30);
+  let common::TestEnv { wal: old_wal, _dir, root } = env;
+  drop(old_wal);
+  let mut reopen = opts;
+  reopen.root_path = root;
+  let wal = ironwal::Wal::new(reopen).unwrap();
+  let ids: Vec<u64> = wal.iter_with_ids(stream, 0).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (0..31).collect::<Vec<_>>());
+
+  // and a second truncation archives again
+  assert_eq!(wal.truncate(stream, 15).unwrap(), 1);
+  assert!(archived.join(segment_filename(0)).exists());
+}
+
+#[test]
+fn test_restore_without_an_archive_is_a_no_op() {
+  let env = TestEnv::with_default();
+  let stream = "no_archive";
+  env.wal.append(stream, b"x").unwrap();
+  assert_eq!(env.wal.restore_archived(stream).unwrap(), 0);
+  assert_eq!(env.wal.get(stream, 0).unwrap().unwrap(), b"x");
+}
+
+#[test]
 fn test_index_rebuild_after_truncate() {
   let mut opts = WalOptions::default();
   opts.max_segment_size = u64::MAX;

@@ -37,6 +37,7 @@ Configuration for initializing the WAL.
 *   `pub read_strategy: ReadStrategy` - method used for reading segments (IO vs Mmap).
 *   `pub on_corruption: CorruptionPolicy` - Action to take when corrupted data is found.
 *   `pub min_compression_size: usize` - Minimum payload size required to trigger compression.
+*   `pub archive_path: Option<PathBuf>` - Where `truncate` moves freed segments (`{archive_path}/{stream}/{segment}`) instead of deleting them; `restore_archived` moves them back. Must lie outside `root_path`. Default: None.
 
 ### `enum SyncMode`
 Defines durability guarantees.
@@ -80,7 +81,9 @@ The primary interface for the library.
 *   `pub fn iter_with_ids(&self, stream: &str, start_id: u64) -> Result<WalIdIterator>`
     *   Like `iter`, but yields `(id, entry)` pairs.
 *   `pub fn truncate(&self, stream: &str, safe_id: u64) -> Result<usize>`
-    *   Deletes segments containing only records older than `safe_id`. Returns count of deleted segments. Never deletes the active segment.
+    *   Frees segments containing only records older than `safe_id`: deleted by default, moved to `archive_path` when one is configured. Returns the count freed. Never frees the active segment.
+*   `pub fn restore_archived(&self, stream: &str) -> Result<usize>`
+    *   Moves every archived segment of the stream back and rebuilds `segments.idx` from the segment files present, so the restored history reads again from its first ID. Returns the count restored, 0 with nothing archived or no `archive_path`. Idempotent and crash-safe (rerun to finish an interrupted restore). Stop appending to the stream before calling.
 *   `pub fn delete_stream(&self, stream: &str) -> Result<()>`
     *   Removes a stream entirely: all segment files, its index and its in-memory state. A subsequent append recreates the stream starting from ID 0. Idempotent; crash-safe (an interrupted delete is completed on the next `Wal::new`). Stop appending to the stream before calling; a racing append may recreate the stream mid-deletion.
 *   `pub fn current_segment_start_id(&self, stream: &str) -> Option<u64>`

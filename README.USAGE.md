@@ -71,6 +71,7 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 *   **`max_open_segments`** (`usize`): The size of the LRU cache for open **write** file descriptors. Default: 128.
 *   **`max_open_read_segments`** (`usize`): The size of the LRU cache for open **read** file descriptors on rotated (immutable) segments. Active segments always use a transient handle and are not counted against this limit. Increase for workloads with many historical segments accessed concurrently. Default: 128.
 *   **`block_cache_size`** (`Option<u64>`): If set, enables an in-memory LRU cache for decompressed read blocks.
+*   **`archive_path`** (`Option<PathBuf>`): If set, `truncate` moves the segments it frees to `{archive_path}/{stream}/` instead of deleting them; `restore_archived` moves them back. Keep it outside `root_path`. Default: None.
 
 ### Enums and Options
 
@@ -123,7 +124,9 @@ for entry in wal.iter_with_ids("logs", 0)? {
 To manage disk usage, you can prune old data that has already been processed or snapshot.
 
 *   `fn truncate(&self, stream: &str, safe_id: u64) -> Result<usize>`
-    *   Deletes all segment files where *all* contained records have IDs strictly less than `safe_id`. This method guarantees that the active segment is never deleted, ensuring writer safety. Returns the number of deleted files.
+    *   Frees all segment files where *all* contained records have IDs strictly less than `safe_id`. This method guarantees that the active segment is never freed, ensuring writer safety. Returns the number of files freed. With `archive_path` set in the options the files are moved to `{archive_path}/{stream}/` rather than deleted, which turns truncation into a reversible step: the caller decides later whether to delete the archive or restore it.
+*   `fn restore_archived(&self, stream: &str) -> Result<usize>`
+    *   Moves every archived segment of the stream back into place and rebuilds the index from the files on disk, so the history reads again from its first ID. Returns the number restored. Rerunning it is harmless; an interrupted restore is finished by running it again. Stop appending to the stream first.
 *   `fn delete_stream(&self, stream: &str) -> Result<()>`
     *   Removes a stream entirely, including its active segment and in-memory state. Unlike `truncate`, sequence IDs restart: the next append to that name creates a fresh stream at ID 0. The call is idempotent and crash-safe; an interrupted delete is finished on the next `Wal::new`. Stop appending to the stream before deleting it, since a racing append may recreate the stream mid-deletion.
 

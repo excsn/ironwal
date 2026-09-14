@@ -105,6 +105,11 @@ pub struct WalOptions {
   /// uncompressed even if `compression` is enabled.
   /// Default: 1 KB.
   pub min_compression_size: usize,
+
+  /// Where `truncate` moves the segments it frees instead of unlinking them, laid out as
+  /// `{archive_path}/{stream}/{segment}`; `restore_archived` moves them back. Must lie
+  /// outside `root_path`. Default: None (freed segments are deleted).
+  pub archive_path: Option<PathBuf>,
 }
 
 impl Default for WalOptions {
@@ -123,6 +128,7 @@ impl Default for WalOptions {
       read_strategy: ReadStrategy::StandardIo,
       on_corruption: CorruptionPolicy::Truncate,
       min_compression_size: 1024, // 1 KB
+      archive_path: None,
     }
   }
 }
