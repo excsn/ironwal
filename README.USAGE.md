@@ -107,7 +107,7 @@ IronWal supports both random access and sequential scanning.
 *   `fn get_batch(&self, stream: &str, ids: &[u64]) -> Result<Vec<Option<Vec<u8>>>>`
     *   Retrieves multiple entries in one call. Significantly cheaper than repeated `get` calls under the `StandardIo` read strategy.
 *   `fn iter(&self, stream: &str, start_id: u64) -> Result<WalIterator>`
-    *   Returns an iterator that yields entries sequentially starting from `start_id`. It seamlessly handles crossing segment file boundaries.
+    *   Returns an iterator that yields entries sequentially starting from `start_id`. It seamlessly handles crossing segment file boundaries. After `truncate`, a `start_id` below the first retained entry begins at the first retained entry rather than yielding nothing; pair it with `iter_with_ids` to learn where the stream now starts.
 *   `fn iter_with_ids(&self, stream: &str, start_id: u64) -> Result<WalIdIterator>`
     *   The same scan, but yielding `(id, entry)` pairs. Use this when consumers need to track their position in the stream.
 

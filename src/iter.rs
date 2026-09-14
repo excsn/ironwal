@@ -34,12 +34,12 @@ impl WalIterator {
       current_segment_start_id: None,
     };
 
-    // 1. Locate and Open the correct segment file
+    // 1. Locate and Open the correct segment file; a freed start moves `next_id` forward
     iter.open_segment_containing(start_id)?;
 
     // 2. Efficiently seek within the file to the correct frame
     if let Some(reader) = &mut iter.reader {
-      reader.seek_to_frame(start_id)?;
+      reader.seek_to_frame(iter.next_id)?;
     }
 
     Ok(iter)
@@ -69,7 +69,27 @@ impl WalIterator {
     let index = self.wal.get_or_load_index(&stream_dir, &idx_path)?;
 
     // Find Start ID
-    let start_id = index.find_segment_start_id(target_id)?;
+    let mut start_id = index.find_segment_start_id(target_id)?;
+    let mut segment_path = stream_dir.join(segment_filename(start_id));
+
+    // The segment that would hold `target_id` may have been freed by `truncate`; the stream
+    // then begins at the first retained segment past it, so this iterator does too.
+    if !segment_path.exists() {
+      match index.iter().find(|&id| id > target_id && stream_dir.join(segment_filename(id)).exists()) {
+        Some(first_retained) => {
+          start_id = first_retained;
+          segment_path = stream_dir.join(segment_filename(start_id));
+          if self.next_id < start_id {
+            self.next_id = start_id;
+          }
+        }
+        None => {
+          self.reader = None;
+          self.current_segment_start_id = None;
+          return Ok(());
+        }
+      }
+    }
 
     // Check for infinite loop (re-opening the same completed segment)
     if let Some(current) = self.current_segment_start_id {
@@ -80,15 +100,9 @@ impl WalIterator {
       }
     }
 
-    let segment_path = stream_dir.join(segment_filename(start_id));
-    if segment_path.exists() {
-      let reader = SegmentReader::open(&segment_path, &self.wal.options())?;
-      self.reader = Some(reader);
-      self.current_segment_start_id = Some(start_id);
-    } else {
-      self.reader = None;
-      self.current_segment_start_id = None;
-    }
+    let reader = SegmentReader::open(&segment_path, &self.wal.options())?;
+    self.reader = Some(reader);
+    self.current_segment_start_id = Some(start_id);
 
     Ok(())
   }

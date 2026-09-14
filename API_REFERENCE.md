@@ -76,7 +76,7 @@ The primary interface for the library.
 *   `pub fn get_batch(&self, stream: &str, ids: &[u64]) -> Result<Vec<Option<Vec<u8>>>>`
     *   Retrieves multiple entries in one call, grouped by segment. Results are in input order; missing IDs (and a missing stream) yield `None`.
 *   `pub fn iter(&self, stream: &str, start_id: u64) -> Result<WalIterator>`
-    *   Returns an iterator over entries starting from `start_id`.
+    *   Returns an iterator over entries starting from `start_id`. A `start_id` below the first retained entry (its segment freed by `truncate`) begins at the first retained entry; `iter_with_ids` reports where that was.
 *   `pub fn iter_with_ids(&self, stream: &str, start_id: u64) -> Result<WalIdIterator>`
     *   Like `iter`, but yields `(id, entry)` pairs.
 *   `pub fn truncate(&self, stream: &str, safe_id: u64) -> Result<usize>`

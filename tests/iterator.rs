@@ -183,6 +183,45 @@ fn test_iter_with_ids_after_truncate() {
 }
 
 #[test]
+fn test_iter_from_a_truncated_id_starts_at_the_first_retained_entry() {
+  let mut opts = WalOptions::default();
+  opts.max_segment_size = u64::MAX;
+  opts.max_entries_per_segment = 10;
+  let env = TestEnv::new(opts.clone());
+  let stream = "iter_truncated_start";
+
+  for i in 0..30u8 {
+    env.wal.append(stream, &[i]).unwrap();
+  }
+  assert_eq!(env.wal.truncate(stream, 15).unwrap(), 1);
+
+  let ids: Vec<u64> = env.wal.iter_with_ids(stream, 0).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (10..30).collect::<Vec<_>>(), "a start id below the first retained segment begins at the first retained entry");
+
+  let ids: Vec<u64> = env.wal.iter_with_ids(stream, 5).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (10..30).collect::<Vec<_>>(), "a start id inside a freed segment behaves the same");
+
+  let entries: Vec<Vec<u8>> = env.wal.iter(stream, 0).unwrap().map(|e| e.unwrap()).collect();
+  assert_eq!(entries, (10..30u8).map(|i| vec![i]).collect::<Vec<_>>(), "the plain iterator agrees");
+
+  // two segments freed; a fresh handle on the same files gives the same answer
+  assert_eq!(env.wal.truncate(stream, 25).unwrap(), 1);
+  let ids: Vec<u64> = env.wal.iter_with_ids(stream, 0).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (20..30).collect::<Vec<_>>());
+  let mut reopen = opts;
+  reopen.root_path = env.root.clone();
+  let reopened = ironwal::Wal::new(reopen).unwrap();
+  let ids: Vec<u64> = reopened.iter_with_ids(stream, 3).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (20..30).collect::<Vec<_>>(), "a reopened wal resolves the start the same way");
+
+  // an exact retained start and a start past the end are unchanged
+  let ids: Vec<u64> = env.wal.iter_with_ids(stream, 20).unwrap().map(|e| e.unwrap().0).collect();
+  assert_eq!(ids, (20..30).collect::<Vec<_>>());
+  assert!(env.wal.iter_with_ids(stream, 30).unwrap().next().is_none());
+  assert!(env.wal.get(stream, 5).unwrap().is_none(), "a freed id still reads as gone");
+}
+
+#[test]
 fn test_iter_with_ids_empty_stream() {
   let env = TestEnv::with_default();
   let mut iter = env.wal.iter_with_ids("non_existent", 0).unwrap();
