@@ -1,7 +1,8 @@
 [package]
 name = "ironwal"
-version = "0.6.9"
+version = "0.6.10"
 edition = "2024"
+include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/README.md", "/README.USAGE.md", "/API_REFERENCE.md"]
 
 description = "A high performance, high durability, deterministic Write-Ahead Log (WAL) for reliable systems of record."
 authors = ["Excerion Sun <dev@excsn.com>"]
