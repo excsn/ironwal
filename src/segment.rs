@@ -2,7 +2,8 @@ use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::config::{CompressionType, ReadStrategy, WalOptions};
 use crate::error::{Error, Result};
@@ -32,10 +33,12 @@ pub(crate) struct ActiveSegment {
   path: PathBuf,
   // The internal state is protected to allow usage via Arc from the Cache
   inner: Mutex<InnerSegment>,
+  /// The WAL's count of fsyncs, shared by every segment it opens.
+  syncs: Arc<AtomicU64>,
 }
 
 impl ActiveSegment {
-  pub fn create(path: PathBuf, _start_id: u64, options: &WalOptions) -> Result<Self> {
+  pub fn create(path: PathBuf, _start_id: u64, options: &WalOptions, syncs: Arc<AtomicU64>) -> Result<Self> {
     let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
     let metadata = file.metadata()?;
@@ -45,6 +48,7 @@ impl ActiveSegment {
 
     Ok(Self {
       path,
+      syncs,
       inner: Mutex::new(InnerSegment {
         file: writer,
         current_size,
@@ -101,6 +105,7 @@ impl ActiveSegment {
     let mut inner = self.inner.lock();
     inner.file.flush().map_err(Error::Io)?;
     inner.file.get_ref().sync_data().map_err(Error::Io)?;
+    self.syncs.fetch_add(1, Ordering::Relaxed);
     Ok(())
   }
 

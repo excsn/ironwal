@@ -6,6 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use fibre_cache::policy::lru::LruPolicy;
@@ -39,6 +40,12 @@ pub struct BlockCacheKey {
 
 pub struct WalState {
   options: WalOptions,
+
+  /// fsyncs issued since the WAL opened.
+  syncs: Arc<AtomicU64>,
+
+  /// One gate per stream that writes wait at for their fsync.
+  gates: RwLock<HashMap<String, Arc<SyncGate>>>,
 
   // Manages per-stream locking internally.
   streams: StreamStateMap,
@@ -107,6 +114,7 @@ impl WalState {
       segment_path.clone(),
       state.active_segment_start_id,
       &self.options,
+      self.syncs.clone(),
     )?;
 
     if exists && !state.tail_repaired {
@@ -135,7 +143,14 @@ impl WalState {
     let old_segment_path = stream_dir.join(segment_filename(state.active_segment_start_id));
     let index_path = stream_dir.join(SegmentIndex::FILENAME);
 
-    // 1. Force flush and close of the old segment via cache invalidation
+    // 1. Force flush and close of the old segment via cache invalidation.
+    // Eviction only hands the buffer to the OS outside Strict mode, and a batch that spans
+    // the rotation has entries in this file that its caller waits to see synced.
+    if self.options.sync_mode != SyncMode::Async
+      && let Some(old) = self.write_cache.fetch(&old_segment_path)
+    {
+      old.flush()?;
+    }
     self.write_cache.invalidate(&old_segment_path);
 
     // 2. Advance the ID in memory
@@ -155,6 +170,46 @@ impl WalState {
 
     // 5. Create/Get the new segment
     self.get_or_create_segment(stream, state)
+  }
+
+  fn gate(&self, stream: &str) -> Arc<SyncGate> {
+    if let Some(gate) = self.gates.read().get(stream) {
+      return gate.clone();
+    }
+    self.gates.write().entry(stream.to_string()).or_insert_with(|| Arc::new(SyncGate::default())).clone()
+  }
+
+  /// Returns once every entry before `end` is synced. One caller syncs for everyone written by then
+  /// and the others wait for it.
+  fn sync_through(&self, stream: &str, stream_lock: &parking_lot::Mutex<StreamState>, end: u64) -> Result<()> {
+    let gate = self.gate(stream);
+    let mut held = gate.state.lock();
+    loop {
+      if held.synced >= end {
+        return Ok(());
+      }
+      if held.syncing {
+        gate.done.wait(&mut held);
+        continue;
+      }
+      held.syncing = true;
+      let target = held.written;
+      drop(held);
+      let result = (|| {
+        let segment = {
+          let mut state = stream_lock.lock();
+          self.get_or_create_segment(stream, &mut state)?
+        };
+        segment.flush()
+      })();
+      held = gate.state.lock();
+      held.syncing = false;
+      if result.is_ok() {
+        held.synced = held.synced.max(target);
+      }
+      gate.done.notify_all();
+      result?;
+    }
   }
 
   fn write_one(&self, stream: &str, state: &mut StreamState, entry: &[&[u8]]) -> Result<u64> {
@@ -179,12 +234,7 @@ impl WalState {
     let range = final_segment.append(entry, state.next_id, &self.options)?;
     state.next_id = range.end;
 
-    if self.options.sync_mode == SyncMode::Strict {
-      final_segment.flush()?;
-    } else {
-      // For non-strict modes, we must at least flush the application buffer
-      final_segment.flush_buffer()?;
-    }
+    final_segment.flush_buffer()?;
 
     Ok(range.start)
   }
@@ -257,16 +307,35 @@ impl WalState {
       }
     }
 
+    // Flush the userspace BufWriter to the OS kernel so that subsequent reads on new
+    // file descriptors can immediately see the data. The fsync, when the mode asks for
+    // one, happens after the stream's lock is released, so concurrent writers share it.
     let segment = self.get_or_create_segment(stream, state)?;
-    if self.options.sync_mode == SyncMode::Strict || self.options.sync_mode == SyncMode::BatchOnly {
-      segment.flush()?;
-    } else {
-      // For Async mode, flush the userspace BufWriter to the OS kernel so that
-      // subsequent reads on new file descriptors can immediately see the data.
-      segment.flush_buffer()?;
-    }
+    segment.flush_buffer()?;
 
     Ok(overall_start_id..state.next_id)
+  }
+}
+
+#[derive(Default)]
+struct GateState {
+  /// Every entry before this is written to the OS.
+  written: u64,
+  /// Every entry before this is synced.
+  synced: u64,
+  syncing: bool,
+}
+
+#[derive(Default)]
+struct SyncGate {
+  state: parking_lot::Mutex<GateState>,
+  done: parking_lot::Condvar,
+}
+
+impl SyncGate {
+  fn written(&self, end: u64) {
+    let mut held = self.state.lock();
+    held.written = held.written.max(end);
   }
 }
 
@@ -346,6 +415,8 @@ impl Wal {
     Ok(Self {
       inner: Arc::new(WalState {
         options,
+        syncs: Arc::new(AtomicU64::new(0)),
+        gates: RwLock::new(HashMap::new()),
         streams,
         index_cache,
         write_cache,
@@ -596,15 +667,39 @@ impl Wal {
   /// alias to the same stream.
   pub fn append(&self, stream: &str, entry: &[u8]) -> Result<u64> {
     let stream_lock = self.inner.streams.get_or_create(stream);
-    let mut state = stream_lock.lock();
-    self.inner.write_one(stream, &mut state, &[entry])
+    let id = {
+      let mut state = stream_lock.lock();
+      let id = self.inner.write_one(stream, &mut state, &[entry])?;
+      self.inner.gate(stream).written(id + 1);
+      id
+    };
+    if self.inner.options.sync_mode == SyncMode::Strict {
+      self.inner.sync_through(stream, &stream_lock, id + 1)?;
+    }
+    Ok(id)
+  }
+
+  /// How many fsyncs the WAL has issued since it opened.
+  pub fn syncs(&self) -> u64 {
+    self.inner.syncs.load(Ordering::Relaxed)
   }
 
   /// Appends a batch of entries atomically to the WAL.
+  ///
+  /// Outside `SyncMode::Async` it returns once the batch is synced. Batches written on one
+  /// stream while an fsync runs share the next one.
   pub fn append_batch(&self, stream: &str, entries: &[&[u8]]) -> Result<std::ops::Range<u64>> {
     let stream_lock = self.inner.streams.get_or_create(stream);
-    let mut state = stream_lock.lock();
-    self.inner.write_batch(stream, &mut state, entries)
+    let range = {
+      let mut state = stream_lock.lock();
+      let range = self.inner.write_batch(stream, &mut state, entries)?;
+      self.inner.gate(stream).written(range.end);
+      range
+    };
+    if self.inner.options.sync_mode != SyncMode::Async && !range.is_empty() {
+      self.inner.sync_through(stream, &stream_lock, range.end)?;
+    }
+    Ok(range)
   }
 
   /// Returns a `TxnWriter` handle for accumulating a batch of writes in memory.
@@ -1085,6 +1180,7 @@ impl Wal {
       util::ensure_safe_path(&self.inner.options.root_path, key).map_or(false, |dir| dir == stream_dir)
     });
     let _guards: Vec<_> = removed.iter().map(|state| state.lock()).collect();
+    self.inner.gates.write().retain(|key, _| util::ensure_safe_path(&self.inner.options.root_path, key).ok().is_none_or(|dir| dir != stream_dir));
 
     {
       let mut generations = self.inner.stream_generations.write();
