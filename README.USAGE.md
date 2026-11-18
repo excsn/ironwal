@@ -77,7 +77,7 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 
 *   **`SyncMode`**:
     *   `Strict`: Calls `fsync` after every single append. Highest safety, lowest throughput.
-    *   `BatchOnly`: Calls `fsync` only on batch writes.
+    *   `BatchOnly`: Calls `fsync` on every batch write. A single `append` is not synced.
     *   `Async`: Relies on OS background flushing. Highest throughput, risk of data loss on power failure.
 *   **`CompressionType`**:
     *   `None`: Raw binary storage.
@@ -92,10 +92,12 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 
 The primary entry point for writing is the `Wal` struct. Writes are thread-safe and use fine-grained locking, so multiple threads can write to different streams simultaneously without contention.
 
+Under `Strict` and `BatchOnly`, writes to one stream that land while an `fsync` is running share the next `fsync`. Concurrent writers to a stream do not pay one `fsync` each. `Wal::syncs` counts the `fsync` calls issued since the WAL opened.
+
 *   `fn append(&self, stream: &str, entry: &[u8]) -> Result<u64>`
     *   Appends a single entry and returns its assigned Sequence ID.
 *   `fn append_batch(&self, stream: &str, entries: &[&[u8]]) -> Result<Range<u64>>`
-    *   Atomically writes multiple entries. Returns the range of Sequence IDs assigned.
+    *   Atomically writes multiple entries. Returns the range of Sequence IDs assigned. Outside `SyncMode::Async` it returns once the batch is synced.
 *   `fn writer(&self, stream: &str) -> TxnWriter`
     *   Creates a `TxnWriter` helper for accumulating data in memory before committing it as a batch.
 
