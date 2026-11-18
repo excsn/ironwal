@@ -219,7 +219,7 @@ impl WalState {
     // Estimate: payload size + fixed frame overhead
     // Entry count is derived from the sequencer state (exact across restarts
     // and descriptor reopens, unlike a per-file-handle counter).
-    let entry_size_estimate = entry[0].len() as u64 + 32;
+    let entry_size_estimate = (crate::frame::FrameHeader::SIZE + 4 + entry[0].len()) as u64;
     let entries_in_segment = state.next_id - state.active_segment_start_id;
     let needs_rotation = (segment.size() + entry_size_estimate) > self.options.max_segment_size
       || entries_in_segment >= self.options.max_entries_per_segment;
@@ -258,19 +258,14 @@ impl WalState {
       // --- Calculate how many entries can fit ---
       let remaining_space = self.options.max_segment_size.saturating_sub(segment.size());
       let mut chunk_end_idx = entries_processed;
-      let mut chunk_byte_size = 0;
+      let mut chunk_byte_size = crate::frame::FrameHeader::SIZE as u64;
 
       for entry in &entries[entries_processed..] {
-        let record_size_estimate = (entry.len() + 32) as u64;
-
-        // If we have picked at least one entry, and this one overflows, stop here.
-        if chunk_byte_size + record_size_estimate > remaining_space
-          && chunk_end_idx > entries_processed
-        {
+        let entry_bytes = (entry.len() + 4) as u64;
+        if chunk_byte_size + entry_bytes > remaining_space {
           break;
         }
-
-        chunk_byte_size += record_size_estimate;
+        chunk_byte_size += entry_bytes;
         chunk_end_idx += 1;
       }
 
