@@ -43,7 +43,7 @@ Configuration for initializing the WAL.
 Defines durability guarantees.
 *   `Strict`: `fsync` after every append. Appends to one stream that land while an `fsync` runs share the next one.
 *   `BatchOnly`: `fsync` on every batch or txn commit, shared the same way. A single `append` is not synced.
-*   `Async`: Relies on OS background flush.
+*   `Async`: Relies on OS background flush. Never calls `fsync`, including when a segment rolls.
 
 ### `enum ReadStrategy`
 Defines file access method.
@@ -71,7 +71,7 @@ The primary interface for the library.
 *   `pub fn append_batch(&self, stream: &str, entries: &[&[u8]]) -> Result<std::ops::Range<u64>>`
     *   Appends multiple entries atomically. Returns the range of assigned IDs. Outside `SyncMode::Async` it returns once the batch is synced.
 *   `pub fn syncs(&self) -> u64`
-    *   How many `fsync` calls the WAL has issued since it opened.
+    *   How many `fsync` calls the WAL has issued since it opened, on segments, directories and `segments.idx` alike.
 *   `pub fn writer(&self, stream: &str) -> TxnWriter`
     *   Creates a transaction writer for buffering appends in memory.
 *   `pub fn get(&self, stream: &str, id: u64) -> Result<Option<Vec<u8>>>`

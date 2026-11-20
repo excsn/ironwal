@@ -74,12 +74,12 @@ impl SegmentIndex {
   }
 }
 
-/// Appends a new start ID to the index file.
+/// Appends a new start ID to the index file without syncing it. Recovery rebuilds the index from the
+/// segment files when it lags them.
 pub fn append_index(stream_dir: &Path, new_start_id: u64) -> Result<()> {
   let path = stream_dir.join(SegmentIndex::FILENAME);
   let mut file = OpenOptions::new().append(true).create(true).open(path)?;
 
   file.write_u64::<LittleEndian>(new_start_id)?;
-  file.sync_all()?;
   Ok(())
 }

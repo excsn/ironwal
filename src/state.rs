@@ -73,7 +73,8 @@ impl StreamStateFile {
     }))
   }
 
-  /// Writes the state file to a stream directory atomically using a binary format.
+  /// Writes the state file to a stream directory through a rename, without syncing it. Recovery
+  /// treats an unreadable state file as absent and goes by the index and the segment files.
   pub fn write_to(&self, stream_dir: &Path) -> Result<()> {
     let temp_path = stream_dir.join(format!("{}.tmp", Self::FILENAME));
     let final_path = stream_dir.join(Self::FILENAME);
@@ -96,14 +97,9 @@ impl StreamStateFile {
     writer.write_all(name_bytes)?;
 
     writer.flush()?;
-    writer.get_ref().sync_all()?;
+    drop(writer);
 
-    // 2. Atomically rename the temp file to the final name
     fs::rename(&temp_path, &final_path)?;
-
-    // 3. fsync the parent directory to ensure the rename is persisted
-    let parent_dir = File::open(stream_dir)?;
-    parent_dir.sync_all()?;
 
     Ok(())
   }

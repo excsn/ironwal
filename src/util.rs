@@ -1,5 +1,19 @@
 use crate::error::{Error, Result};
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// `sync_all` on `file`, counted in `syncs`.
+pub fn sync_file(file: &File, syncs: &AtomicU64) -> std::io::Result<()> {
+  file.sync_all()?;
+  syncs.fetch_add(1, Ordering::Relaxed);
+  Ok(())
+}
+
+/// fsyncs the directory at `dir`, which makes the entries created, renamed or removed in it durable.
+pub fn sync_dir(dir: &Path, syncs: &AtomicU64) -> std::io::Result<()> {
+  sync_file(&File::open(dir)?, syncs)
+}
 
 /// Suffix a stream directory is renamed to before deletion. `#` is outside
 /// the output alphabet of `sanitize_stream_key`, so no live stream directory

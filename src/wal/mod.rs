@@ -116,6 +116,9 @@ impl WalState {
       &self.options,
       self.syncs.clone(),
     )?;
+    if !exists && self.options.sync_mode != SyncMode::Async {
+      util::sync_dir(&stream_dir, &self.syncs)?;
+    }
 
     if exists && !state.tail_repaired {
       // Opening an existing file whose tail we haven't verified in this
@@ -161,14 +164,15 @@ impl WalState {
     // Invalidate the index cache because the file on disk has changed
     self.index_cache.invalidate(&index_path);
 
-    // 4. Update Head State: Atomic Write
+    // 4. Update Head State
     let head_state = StreamStateFile {
       active_segment_name: segment_filename(state.active_segment_start_id),
       version: StreamStateFile::VERSION,
     };
     head_state.write_to(&stream_dir)?;
 
-    // 5. Create/Get the new segment
+    // 5. Create/Get the new segment. Outside Async mode this syncs the stream directory, which makes
+    // the new segment file and the head rename durable. The index and the head are not synced.
     self.get_or_create_segment(stream, state)
   }
 
@@ -404,13 +408,14 @@ impl Wal {
       .map_err(|e| Error::Config(format!("Failed to build read descriptor cache: {}", e)))?;
 
     // 2. Scan and recover state from filesystem
-    let streams_map = Self::recover_all_streams(&options, &index_cache)?;
+    let syncs = Arc::new(AtomicU64::new(0));
+    let streams_map = Self::recover_all_streams(&options, &index_cache, &syncs)?;
     let streams = StreamStateMap::new(streams_map);
 
     Ok(Self {
       inner: Arc::new(WalState {
         options,
-        syncs: Arc::new(AtomicU64::new(0)),
+        syncs,
         gates: RwLock::new(HashMap::new()),
         streams,
         index_cache,
@@ -493,6 +498,7 @@ impl Wal {
   fn recover_all_streams(
     options: &WalOptions,
     index_cache: &Cache<PathBuf, SegmentIndex>,
+    syncs: &AtomicU64,
   ) -> Result<HashMap<String, StreamState>> {
     let mut streams = HashMap::new();
     if !options.root_path.exists() {
@@ -513,7 +519,7 @@ impl Wal {
           continue;
         }
 
-        if let Some(state) = Self::recover_stream(&stream_dir, options, index_cache)? {
+        if let Some(state) = Self::recover_stream(&stream_dir, options, index_cache, syncs)? {
           streams.insert(stream_key, state);
         }
       }
@@ -526,12 +532,15 @@ impl Wal {
     stream_dir: &Path,
     options: &WalOptions,
     index_cache: &Cache<PathBuf, SegmentIndex>,
+    syncs: &AtomicU64,
   ) -> Result<Option<StreamState>> {
     let index_path = stream_dir.join("segments.idx");
 
-    // 1. Initial Index Load
-    if let Err(_) = SegmentIndex::open(stream_dir) {
-      Self::rebuild_index_from_scan(stream_dir)?;
+    // 1. Initial Index Load. Rolls do not sync the index, so it can lag the segment files.
+    let newest_on_disk = Self::segment_ids_on_disk(stream_dir)?.into_iter().max();
+    let index_current = SegmentIndex::open(stream_dir).ok().is_some_and(|index| index.iter().last() >= newest_on_disk);
+    if !index_current {
+      Self::rebuild_index_from_scan(stream_dir, syncs)?;
     }
     let mut index = index_cache
       .fetch(&index_path)
@@ -543,7 +552,10 @@ impl Wal {
       .unwrap();
 
     // 2. Determine Active Segment from Head State
-    let head_state = StreamStateFile::read_from(stream_dir)?;
+    let head_state = StreamStateFile::read_from(stream_dir).unwrap_or_else(|e| {
+      tracing::warn!(target: "ironwal", "Ignoring unreadable head.state in {}: {}", stream_dir.display(), e);
+      None
+    });
     let mut active_segment_start_id = 0;
     if let Some(state) = head_state {
       if let Some(id) = util::parse_segment_id(&state.active_segment_name) {
@@ -559,7 +571,7 @@ impl Wal {
       tracing::warn!(target: "ironwal", "Index is stale (Last: {}, Active: {}). Rebuilding...", last_index_id, active_segment_start_id);
 
       // Force Rebuild
-      Self::rebuild_index_from_scan(stream_dir)?;
+      Self::rebuild_index_from_scan(stream_dir, syncs)?;
 
       // Invalidate and Reload
       index_cache.invalidate(&index_path);
@@ -608,7 +620,7 @@ impl Wal {
       );
       let file = OpenOptions::new().write(true).open(&active_segment_path)?;
       file.set_len(valid_len)?;
-      file.sync_all()?;
+      util::sync_file(&file, syncs)?;
     }
 
     let next_id = active_segment_start_id + entries_in_segment;
@@ -622,16 +634,8 @@ impl Wal {
 
   /// Slow-path recovery: Scans a stream directory for all `.wal` files
   /// and rebuilds the `segments.idx` file from scratch.
-  fn rebuild_index_from_scan(stream_dir: &Path) -> Result<()> {
-    let mut start_ids = Vec::new();
-    for entry in fs::read_dir(stream_dir)? {
-      let entry = entry?;
-      let filename = entry.file_name().to_string_lossy().to_string();
-      if let Some(id) = util::parse_segment_id(&filename) {
-        start_ids.push(id);
-      }
-    }
-
+  fn rebuild_index_from_scan(stream_dir: &Path, syncs: &AtomicU64) -> Result<()> {
+    let mut start_ids = Self::segment_ids_on_disk(stream_dir)?;
     start_ids.sort_unstable();
 
     let temp_path = stream_dir.join("segments.idx.tmp");
@@ -645,12 +649,23 @@ impl Wal {
     for id in start_ids {
       file.write_u64::<LittleEndian>(id)?;
     }
-    file.sync_all()?;
+    util::sync_file(&file, syncs)?;
     drop(file);
 
     fs::rename(&temp_path, &final_path)?;
 
     Ok(())
+  }
+
+  /// The start ID of every segment file in `stream_dir`, in directory order.
+  fn segment_ids_on_disk(stream_dir: &Path) -> Result<Vec<u64>> {
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(stream_dir)? {
+      if let Some(id) = util::parse_segment_id(&entry?.file_name().to_string_lossy()) {
+        ids.push(id);
+      }
+    }
+    Ok(ids)
   }
 
   // --- Write Operations ---
@@ -1082,7 +1097,7 @@ impl Wal {
       for id in new_ids {
         file.write_u64::<LittleEndian>(id)?;
       }
-      file.sync_all()?;
+      util::sync_file(&file, &self.inner.syncs)?;
       drop(file);
 
       if let Err(e) = fs::rename(&temp_path, &final_path) {
@@ -1146,7 +1161,7 @@ impl Wal {
     for id in ids {
       file.write_u64::<LittleEndian>(id)?;
     }
-    file.sync_all()?;
+    util::sync_file(&file, &self.inner.syncs)?;
     drop(file);
     fs::rename(&temp_path, &idx_path)?;
     self.inner.index_cache.invalidate(&idx_path);
@@ -1210,8 +1225,7 @@ impl Wal {
       fs::remove_dir_all(&marker)?;
     }
     fs::rename(&stream_dir, &marker)?;
-    let root = fs::File::open(&self.inner.options.root_path)?;
-    root.sync_all()?;
+    util::sync_dir(&self.inner.options.root_path, &self.inner.syncs)?;
     fs::remove_dir_all(&marker)?;
 
     Ok(())

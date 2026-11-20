@@ -39,10 +39,12 @@ fn concurrent_batches_on_one_stream_share_fsyncs_and_all_land() {
 #[test]
 fn a_lone_writer_gets_one_fsync_per_batch() {
   let env = TestEnv::new(options(SyncMode::BatchOnly));
-  for batch in 0..10u8 {
+  env.wal.append_batch("alone", &[&[0]]).unwrap();
+  let created = env.wal.syncs();
+  for batch in 1..=10u8 {
     env.wal.append_batch("alone", &[&[batch]]).unwrap();
   }
-  assert_eq!(env.wal.syncs(), 10);
+  assert_eq!(env.wal.syncs() - created, 10);
 }
 
 #[test]
@@ -73,5 +75,5 @@ fn a_stream_written_again_after_deletion_still_waits_for_its_fsync() {
   env.wal.delete_stream("again").unwrap();
   let before = env.wal.syncs();
   env.wal.append_batch("again", &[&[9]]).unwrap();
-  assert_eq!(env.wal.syncs(), before + 1, "ids restart at 0, so an old synced mark must not count");
+  assert_eq!(env.wal.syncs(), before + 2, "the recreated segment's directory and the batch are synced: ids restart at 0, so an old synced mark must not count");
 }

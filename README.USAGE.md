@@ -78,7 +78,7 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 *   **`SyncMode`**:
     *   `Strict`: Calls `fsync` after every single append. Highest safety, lowest throughput.
     *   `BatchOnly`: Calls `fsync` on every batch write. A single `append` is not synced.
-    *   `Async`: Relies on OS background flushing. Highest throughput, risk of data loss on power failure.
+    *   `Async`: Relies on OS background flushing and never calls `fsync`, including when a segment rolls. Highest throughput, risk of data loss on power failure.
 *   **`CompressionType`**:
     *   `None`: Raw binary storage.
     *   `Lz4`: Uses LZ4 frame format. Effective for larger payloads or batches.
@@ -92,7 +92,9 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 
 The primary entry point for writing is the `Wal` struct. Writes are thread-safe and use fine-grained locking, so multiple threads can write to different streams simultaneously without contention.
 
-Under `Strict` and `BatchOnly`, writes to one stream that land while an `fsync` is running share the next `fsync`. Concurrent writers to a stream do not pay one `fsync` each. `Wal::syncs` counts the `fsync` calls issued since the WAL opened.
+Under `Strict` and `BatchOnly`, writes to one stream that land while an `fsync` is running share the next `fsync`. Concurrent writers to a stream do not pay one `fsync` each. `Wal::syncs` counts every `fsync` call issued since the WAL opened, including the ones on directories and on `segments.idx`.
+
+Rolling to a new segment under `Strict` or `BatchOnly` costs two `fsync` calls: one on the segment it leaves and one on the stream directory. `segments.idx` and `head.state` are written without one.
 
 *   `fn append(&self, stream: &str, entry: &[u8]) -> Result<u64>`
     *   Appends a single entry and returns its assigned Sequence ID.
@@ -413,5 +415,5 @@ All operations return a `Result<T, ironwal::Error>`.
 IronWal is designed to recover automatically from crashes.
 
 *   **Startup Scan**: On initialization, the WAL scans directories to rebuild the internal state.
-*   **Self-Healing**: If the `segments.idx` file is corrupt or missing, the WAL will rebuild it by scanning the actual segment files.
+*   **Self-Healing**: If the `segments.idx` file is corrupt, missing or lists fewer segments than the stream directory holds, the WAL rebuilds it by scanning the actual segment files. An unreadable `head.state` is ignored.
 *   **Partial Writes**: If a crash occurs during a write, the WAL detects the truncated frame at the end of the log and treats it as non-existent (returning `None` on read). The next write will repair the file by truncating the garbage tail before appending.
