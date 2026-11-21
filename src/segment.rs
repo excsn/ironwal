@@ -298,12 +298,12 @@ impl SegmentReader {
           if target_id >= header.start_id && target_id < frame_end_id {
             // Found it!
             // Rewind back to the start of this header so next_batch reads it.
-            reader.seek(SeekFrom::Current(-(FrameHeader::SIZE as i64)))?;
+            reader.seek_relative(-(FrameHeader::SIZE as i64))?;
             return Ok(());
           }
 
           // Skip payload
-          reader.seek(SeekFrom::Current(header.disk_size as i64))?;
+          reader.seek_relative(header.disk_size as i64)?;
         }
       }
       Self::Mmap(mmap, cursor) => {
@@ -362,7 +362,7 @@ impl SegmentReader {
             // Torn tail: header is present but the payload is not.
             break;
           }
-          reader.seek(SeekFrom::Current(header.disk_size as i64))?;
+          reader.seek_relative(header.disk_size as i64)?;
           total_entries += header.entry_count as u64;
           last_frame = Some((pos, header));
           pos += frame_len;
@@ -477,7 +477,7 @@ impl SegmentReader {
           offset += increment;
 
           // Catch EOF during seek (payload truncation)
-          if let Err(e) = reader.seek(SeekFrom::Current(header.disk_size as i64)) {
+          if let Err(e) = reader.seek_relative(header.disk_size as i64) {
             if e.kind() == io::ErrorKind::UnexpectedEof {
               return Ok(None);
             }
