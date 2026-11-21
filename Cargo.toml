@@ -1,6 +1,6 @@
 [package]
 name = "ironwal"
-version = "0.6.11"
+version = "0.6.12"
 edition = "2024"
 include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/README.md", "/README.USAGE.md", "/API_REFERENCE.md"]
 
