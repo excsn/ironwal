@@ -12,14 +12,14 @@ Add `ironwal` to your `Cargo.toml` dependencies:
 
 ```toml
 [dependencies]
-ironwal = "0.6"
+ironwal = "0.7"
 ```
 
 LZ4 compression support is included in the default features. To be explicit:
 
 ```toml
 [dependencies]
-ironwal = { version = "0.6", features = ["compression"] }
+ironwal = { version = "0.7", features = ["compression"] }
 ```
 
 ## Quick Start
@@ -85,7 +85,7 @@ Note that this is a different mechanism from the per-stream concurrency above: t
 
 ```toml
 [dependencies]
-ironwal = { version = "0.6", features = ["sharded"] }
+ironwal = { version = "0.7", features = ["sharded"] }
 ```
 
 ```rust

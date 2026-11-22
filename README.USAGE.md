@@ -170,7 +170,7 @@ use ironwal::sharded::ShardedWal;
 use ironwal::WalOptions;
 
 // Enable the feature in Cargo.toml:
-// ironwal = { version = "0.6", features = ["sharded"] }
+// ironwal = { version = "0.7", features = ["sharded"] }
 
 let wal = ShardedWal::new(WalOptions::new("./data"), 16)?;
 
