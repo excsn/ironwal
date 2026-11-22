@@ -258,6 +258,7 @@ impl CheckpointEntry {
   /// # Returns
   ///
   /// The user_id as a `Vec<u8>`.
+  #[cfg(test)]
   pub fn extract_user_id(payload: &[u8]) -> Result<Vec<u8>> {
     let mut cursor = Cursor::new(payload);
 

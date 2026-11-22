@@ -4,11 +4,11 @@
 //! checkpoint retrieval without scanning the entire log.
 
 use crate::error::{Error, Result};
-use crate::sharded::checkpoint_log::{CheckpointEntry, HEADER_SIZE};
+use crate::sharded::checkpoint_log::CheckpointEntry;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::BufReader;
 use std::path::Path;
 
 /// Metadata about a checkpoint stored in the index.
@@ -120,6 +120,7 @@ impl CheckpointIndex {
   }
 
   /// Returns true if the index is empty.
+  #[cfg(test)]
   pub fn is_empty(&self) -> bool {
     self.inner.read().is_empty()
   }

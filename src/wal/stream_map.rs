@@ -70,10 +70,4 @@ impl StreamStateMap {
     let keys: Vec<String> = map.keys().filter(|k| pred(k)).cloned().collect();
     keys.iter().filter_map(|k| map.remove(k)).collect()
   }
-
-  /// Helper to check existence without cloning the Arc.
-  pub fn contains(&self, key: &str) -> bool {
-    let map = self.inner.read();
-    map.contains_key(key)
-  }
 }

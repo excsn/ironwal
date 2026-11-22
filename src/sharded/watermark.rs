@@ -66,6 +66,7 @@ impl WatermarkTracker {
   }
 
   /// Gets the current durable offset for a shard.
+  #[cfg(test)]
   pub fn get(&self, shard_id: u16) -> u64 {
     self.watermarks[shard_id as usize].load(Ordering::Acquire)
   }

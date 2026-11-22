@@ -9,7 +9,6 @@ use crate::sharded::watermark::WatermarkTracker;
 use crate::wal::Wal;
 
 use std::collections::HashMap;
-use std::fs;
 use std::sync::Arc;
 
 /// A sharded WAL for horizontal scaling and consistent checkpointing.

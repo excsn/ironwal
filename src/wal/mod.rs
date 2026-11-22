@@ -1234,12 +1234,14 @@ impl Wal {
   /// Gets the current state of a stream (for watermark initialization).
   ///
   /// Returns None if the stream doesn't exist yet.
+  #[cfg(feature = "sharded")]
   pub(crate) fn get_stream_state(&self, stream: &str) -> Result<Option<StreamState>> {
     Ok(self.inner.streams.get(stream).map(|lock| lock.lock().clone()))
   }
 
   /// Flushes the BufWriter and calls `fsync` on the active segment for `stream`.
   /// No-op if the stream has no cached active segment (nothing written yet).
+  #[cfg(feature = "sharded")]
   pub(crate) fn sync_stream(&self, stream: &str) -> Result<()> {
     let stream_dir = self.get_stream_dir(stream)?;
     let seg_start_id = {

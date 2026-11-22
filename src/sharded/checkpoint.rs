@@ -9,7 +9,7 @@ use crate::sharded::index::{CheckpointIndex, CheckpointMetadata};
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Checkpoint data returned when loading.
@@ -290,7 +290,7 @@ impl CheckpointManager {
 
     // Write to temp file
     let mut temp_file = BufWriter::new(File::create(&temp_path)?);
-    let mut new_index = CheckpointIndex::new();
+    let new_index = CheckpointIndex::new();
     let mut new_offset = 0u64;
 
     for (user_id, old_metadata) in &all_checkpoints {
