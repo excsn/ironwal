@@ -33,6 +33,7 @@ Configuration for initializing the WAL.
 *   `pub read_buffer_size: usize` - Size of the in-memory read buffer (`BufReader`).
 *   `pub block_cache_size: Option<u64>` - Size of the read block cache (in bytes). `None` disables it.
 *   `pub sync_mode: SyncMode` - Strategy for flushing data to disk.
+*   `pub buffer_appends: bool` - Under `SyncMode::Async`, keeps appends in the write buffer until it fills, a read of the stream, a segment roll, a flush or the WAL closing, instead of writing each append to the OS before it returns. Returned appends can be lost if the process dies, up to `write_buffer_size` bytes per stream. Reads in the same process always see every returned append. Ignored in the other sync modes. Default: false.
 *   `pub compression: CompressionType` - Compression algorithm for stored frames.
 *   `pub read_strategy: ReadStrategy` - method used for reading segments (IO vs Mmap).
 *   `pub on_corruption: CorruptionPolicy` - Action to take when corrupted data is found.
@@ -43,7 +44,7 @@ Configuration for initializing the WAL.
 Defines durability guarantees.
 *   `Strict`: `fsync` after every append. Appends to one stream that land while an `fsync` runs share the next one.
 *   `BatchOnly`: `fsync` on every batch or txn commit, shared the same way. A single `append` is not synced.
-*   `Async`: Relies on OS background flush. Never calls `fsync`, including when a segment rolls.
+*   `Async`: Relies on OS background flush. Never calls `fsync`, including when a segment rolls. Each append is written to the OS before it returns unless `buffer_appends` is set, so only an OS crash or power loss can lose it.
 
 ### `enum ReadStrategy`
 Defines file access method.

@@ -71,6 +71,7 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 *   **`max_open_segments`** (`usize`): The size of the LRU cache for open **write** file descriptors. Default: 128.
 *   **`max_open_read_segments`** (`usize`): The size of the LRU cache for open **read** file descriptors on rotated (immutable) segments. Active segments always use a transient handle and are not counted against this limit. Increase for workloads with many historical segments accessed concurrently. Default: 128.
 *   **`block_cache_size`** (`Option<u64>`): If set, enables an in-memory LRU cache for decompressed read blocks.
+*   **`buffer_appends`** (`bool`): Under `SyncMode::Async`, keeps appends in the write buffer (`write_buffer_size`, 64 KB by default) until it fills, a read of the stream, a segment roll, a flush or the WAL closing. It saves one `write` call per append. Appends that have returned can be lost if the process dies, up to one buffer per stream. Reads in the same process always see every returned append. Ignored in the other sync modes. Default: false.
 *   **`archive_path`** (`Option<PathBuf>`): If set, `truncate` moves the segments it frees to `{archive_path}/{stream}/` instead of deleting them; `restore_archived` moves them back. Keep it outside `root_path`. Default: None.
 
 ### Enums and Options
@@ -78,7 +79,7 @@ The `WalOptions` struct controls the behavior of the storage engine. It allows y
 *   **`SyncMode`**:
     *   `Strict`: Calls `fsync` after every single append. Highest safety, lowest throughput.
     *   `BatchOnly`: Calls `fsync` on every batch write. A single `append` is not synced.
-    *   `Async`: Relies on OS background flushing and never calls `fsync`, including when a segment rolls. Highest throughput, risk of data loss on power failure.
+    *   `Async`: Relies on OS background flushing and never calls `fsync`, including when a segment rolls. Highest throughput, risk of data loss on power failure. Each append is written to the OS before it returns, so a process crash loses nothing unless `buffer_appends` is set.
 *   **`CompressionType`**:
     *   `None`: Raw binary storage.
     *   `Lz4`: Uses LZ4 frame format. Effective for larger payloads or batches.

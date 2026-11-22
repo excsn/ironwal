@@ -5,13 +5,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use fibre_cache::policy::lru::LruPolicy;
 use fibre_cache::{Cache, CacheBuilder, EvictionListener, EvictionReason};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tracing::error;
 
 use crate::batch::TxnWriter;
@@ -56,6 +56,10 @@ pub struct WalState {
   /// Cache of open file descriptors for WRITING.
   /// Strictly limited by `max_open_segments`.
   write_cache: Cache<PathBuf, ActiveSegment>,
+
+  /// Every segment opened while appends are buffered. The write cache hands an evicted segment to a background
+  /// listener, so its buffer can still be unwritten when the cache no longer holds it.
+  buffered_segments: Mutex<HashMap<PathBuf, Weak<ActiveSegment>>>,
 
   /// Cache for READ blocks (decompressed frames).
   /// Maps (Stream, File, Offset) -> Decompressed Batch
@@ -109,6 +113,7 @@ impl WalState {
     }
 
     // 2. On miss, perform the I/O operation
+    self.write_out_segment(&segment_path)?;
     let exists = segment_path.exists();
     let new_segment = ActiveSegment::create(
       segment_path.clone(),
@@ -135,7 +140,24 @@ impl WalState {
       .insert(segment_path.clone(), new_segment, 1);
 
     // 4. Fetch it again to get the Arc managed by the cache.
-    Ok(self.write_cache.fetch(&segment_path).unwrap())
+    let segment = self.write_cache.fetch(&segment_path).unwrap();
+    if !self.hands_appends_to_os() {
+      self.buffered_segments.lock().insert(segment_path, Arc::downgrade(&segment));
+    }
+    Ok(segment)
+  }
+
+  /// Writes out the buffered appends of the segment at `segment_path`, whether or not the write cache still holds it,
+  /// so a reader of its file or a new handle to it does not run ahead of them.
+  fn write_out_segment(&self, segment_path: &Path) -> Result<()> {
+    if self.hands_appends_to_os() {
+      return Ok(());
+    }
+    let evicted = self.buffered_segments.lock().get(segment_path).and_then(Weak::upgrade);
+    if let Some(segment) = evicted {
+      segment.flush_buffer()?;
+    }
+    Ok(())
   }
 
   /// Rotates the active segment for a stream.
@@ -154,6 +176,8 @@ impl WalState {
     {
       old.flush()?;
     }
+    self.write_out_segment(&old_segment_path)?;
+    self.buffered_segments.lock().remove(&old_segment_path);
     self.write_cache.invalidate(&old_segment_path);
 
     // 2. Advance the ID in memory
@@ -238,9 +262,30 @@ impl WalState {
     let range = final_segment.append(entry, state.next_id, &self.options)?;
     state.next_id = range.end;
 
-    final_segment.flush_buffer()?;
+    if self.hands_appends_to_os() {
+      final_segment.flush_buffer()?;
+    }
 
     Ok(range.start)
+  }
+
+  /// Whether every append is written to the OS before it returns. Only `buffer_appends` under `SyncMode::Async`
+  /// leaves appends in the write buffer.
+  fn hands_appends_to_os(&self) -> bool {
+    !(self.options.buffer_appends && self.options.sync_mode == SyncMode::Async)
+  }
+
+  /// Writes the stream's buffered appends to the OS, so a reader opening its active segment sees them.
+  fn write_out_buffered(&self, stream: &str) -> Result<()> {
+    if self.hands_appends_to_os() {
+      return Ok(());
+    }
+    let Some(stream_lock) = self.streams.get(stream) else {
+      return Ok(());
+    };
+    let segment_start_id = stream_lock.lock().active_segment_start_id;
+    let path = util::ensure_safe_path(&self.options.root_path, stream)?.join(segment_filename(segment_start_id));
+    self.write_out_segment(&path)
   }
 
   fn write_batch(
@@ -309,8 +354,9 @@ impl WalState {
     // Flush the userspace BufWriter to the OS kernel so that subsequent reads on new
     // file descriptors can immediately see the data. The fsync, when the mode asks for
     // one, happens after the stream's lock is released, so concurrent writers share it.
-    let segment = self.get_or_create_segment(stream, state)?;
-    segment.flush_buffer()?;
+    if self.hands_appends_to_os() {
+      self.get_or_create_segment(stream, state)?.flush_buffer()?;
+    }
 
     Ok(overall_start_id..state.next_id)
   }
@@ -339,6 +385,19 @@ impl SyncGate {
 }
 
 /// Listener to ensure data is flushed when a file descriptor is evicted/closed.
+/// The write cache outlives the WAL, so its segments' buffers are not written out by being dropped.
+impl Drop for WalState {
+  fn drop(&mut self) {
+    for (path, segment) in self.buffered_segments.get_mut().drain() {
+      if let Some(segment) = segment.upgrade()
+        && let Err(e) = segment.flush_buffer()
+      {
+        error!(target: "ironwal", "Failed to write out buffered appends on close. Data loss possible. Path: {:?}, Error: {}", path, e);
+      }
+    }
+  }
+}
+
 #[derive(Clone, Copy)]
 struct FlushOnEvict {
   sync_mode: SyncMode,
@@ -420,6 +479,7 @@ impl Wal {
         streams,
         index_cache,
         write_cache,
+        buffered_segments: Mutex::new(HashMap::new()),
         read_cache,
         read_descriptor_cache,
         stream_generations: RwLock::new(HashMap::new()),
@@ -459,11 +519,13 @@ impl Wal {
   /// the iterator yields nothing. Start from a known-surviving ID (e.g. the
   /// `safe_id` passed to the last truncation) to read the remaining history.
   pub fn iter(&self, stream: &str, start_id: u64) -> Result<crate::iter::WalIterator> {
+    self.inner.write_out_buffered(stream)?;
     crate::iter::WalIterator::new(self.clone(), stream.to_string(), start_id)
   }
 
   /// Like [`Wal::iter`], but yields `(id, entry)` pairs.
   pub fn iter_with_ids(&self, stream: &str, start_id: u64) -> Result<crate::iter::WalIdIterator> {
+    self.inner.write_out_buffered(stream)?;
     crate::iter::WalIdIterator::new(self.clone(), stream.to_string(), start_id)
   }
 
@@ -721,6 +783,7 @@ impl Wal {
 
   /// Reads a single entry by its sequence ID.
   pub fn get(&self, stream: &str, id: u64) -> Result<Option<Vec<u8>>> {
+    self.inner.write_out_buffered(stream)?;
     let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
 
     // 1. Locate the segment that contains this ID via the index cache.
@@ -855,6 +918,7 @@ impl Wal {
     if ids.is_empty() {
       return Ok(Vec::new());
     }
+    self.inner.write_out_buffered(stream)?;
 
     let stream_dir = util::ensure_safe_path(&self.inner.options.root_path, stream)?;
     let idx_path = stream_dir.join(SegmentIndex::FILENAME);
@@ -1211,6 +1275,7 @@ impl Wal {
       let filename = entry.file_name().to_string_lossy().to_string();
       if util::parse_segment_id(&filename).is_some() {
         let path = entry.path();
+        self.inner.buffered_segments.lock().remove(&path);
         self.inner.write_cache.invalidate(&path);
         self.inner.read_descriptor_cache.invalidate(&path);
       }
@@ -1249,6 +1314,7 @@ impl Wal {
       lock.lock().active_segment_start_id
     };
     let path = stream_dir.join(segment_filename(seg_start_id));
+    self.inner.write_out_segment(&path)?;
     if let Some(segment) = self.inner.write_cache.fetch(&path) {
       segment.flush()?;
     }

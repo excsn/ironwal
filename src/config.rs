@@ -97,6 +97,13 @@ pub struct WalOptions {
 
   // --- Behavior ---
   pub sync_mode: SyncMode,
+
+  /// Under `SyncMode::Async`, keeps appends in the write buffer until it fills, a read of the stream, a segment
+  /// roll, a flush or the WAL closing, instead of writing each append to the OS before it returns. Saves a `write`
+  /// call per append. Appends that have returned can be lost if the process dies, up to `write_buffer_size` bytes
+  /// per stream. Without it only an OS crash or power loss can lose an append. Ignored in the other sync modes.
+  /// Default: false.
+  pub buffer_appends: bool,
   pub compression: CompressionType,
   pub read_strategy: ReadStrategy,
   pub on_corruption: CorruptionPolicy,
@@ -124,6 +131,7 @@ impl Default for WalOptions {
       read_buffer_size: 128 * 1024, // 128 KB
       block_cache_size: None,
       sync_mode: SyncMode::Strict,
+      buffer_appends: false,
       compression: CompressionType::None,
       read_strategy: ReadStrategy::StandardIo,
       on_corruption: CorruptionPolicy::Truncate,

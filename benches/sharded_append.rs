@@ -8,10 +8,15 @@ use std::hint::black_box;
 use tempfile::TempDir;
 
 fn setup_sharded(shard_count: u16, sync_mode: SyncMode) -> (ShardedWal, TempDir) {
+  setup_sharded_with(shard_count, sync_mode, false)
+}
+
+fn setup_sharded_with(shard_count: u16, sync_mode: SyncMode, buffer_appends: bool) -> (ShardedWal, TempDir) {
   let dir = tempfile::tempdir().unwrap();
   let mut opts = WalOptions::default();
   opts.root_path = dir.path().to_path_buf();
   opts.sync_mode = sync_mode;
+  opts.buffer_appends = buffer_appends;
   let wal = ShardedWal::new(opts, shard_count).unwrap();
 
   // Warmup: Ensure all shards are initialized to avoid lazy-init fsync costs during benchmark
@@ -64,6 +69,19 @@ fn bench_sharded_batch(c: &mut Criterion) {
       shard_count,
       |b, &sc| {
         let (wal, _dir) = setup_sharded(sc, SyncMode::Async);
+        b.iter(|| {
+          wal.append_batch(black_box(&batch)).unwrap();
+        })
+      },
+    );
+  }
+
+  for shard_count in [4, 16, 64].iter() {
+    group.bench_with_input(
+      BenchmarkId::new("batch_100_buffered", shard_count),
+      shard_count,
+      |b, &sc| {
+        let (wal, _dir) = setup_sharded_with(sc, SyncMode::Async, true);
         b.iter(|| {
           wal.append_batch(black_box(&batch)).unwrap();
         })
