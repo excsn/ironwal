@@ -7,12 +7,23 @@ use std::sync::{Arc, OnceLock};
 
 use crate::config::{CompressionType, ReadStrategy, WalOptions};
 use crate::error::{Error, Result};
-use crate::frame::{FrameHeader, FrameType, calculate_checksum, deserialize_batch, serialize_batch};
+use crate::frame::{FrameHeader, FrameType, calculate_checksum, checksum_of_parts, deserialize_batch, length_prefixes, raw_parts};
 
 use memmap2::Mmap;
 
 #[cfg(feature = "compression")]
-use lz4_flex::frame::{FrameDecoder, FrameEncoder};
+use lz4_flex::frame::{BlockSize, FrameDecoder, FrameEncoder, FrameInfo};
+
+/// A payload buffer that grew past this is released after its append rather than kept for the next. A raw batch larger
+/// than this is written from its entries in place instead of being copied.
+const KEPT_PAYLOAD_BUFFER: usize = 4 << 20;
+
+/// Input a compressed append takes before it checks whether compression is saving anything.
+#[cfg(feature = "compression")]
+const COMPRESSION_PROBE_BYTES: usize = 1 << 20;
+
+#[cfg(feature = "compression")]
+const COMPRESSION_BLOCK_BYTES: usize = 256 * 1024;
 
 /// Represents the physical location and metadata of a frame on disk.
 /// Used to decouple the "Scan" phase from the "Fetch" phase.
@@ -25,6 +36,7 @@ pub(crate) struct FrameLocation {
 struct InnerSegment {
   file: BufWriter<File>,
   current_size: u64,
+  payload: Vec<u8>,
 }
 
 /// Represents an active segment file opened for WRITING.
@@ -52,6 +64,7 @@ impl ActiveSegment {
       inner: Mutex::new(InnerSegment {
         file: writer,
         current_size,
+        payload: Vec::new(),
       }),
     })
   }
@@ -65,33 +78,51 @@ impl ActiveSegment {
     }
 
     let mut inner = self.inner.lock();
+    let inner = &mut *inner;
 
-    // 1. Serialize entries into a raw buffer
-    let raw_payload = serialize_batch(entries).map_err(Error::Io)?;
-    let uncompressed_size = raw_payload.len() as u32;
+    let raw_len: usize = entries.iter().map(|entry| 4 + entry.len()).sum();
+    let mut payload = std::mem::take(&mut inner.payload);
+    let is_compressed = Self::compress_into(entries, raw_len, options, &mut payload)?;
+    let in_place = !is_compressed && raw_len > KEPT_PAYLOAD_BUFFER;
+    if !is_compressed && !in_place {
+      payload.reserve(raw_len);
+      for entry in entries {
+        payload.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        payload.extend_from_slice(entry);
+      }
+    }
 
-    // 2. Decide compression
-    let (frame_type, disk_payload) = self.compress_if_needed(&raw_payload, options)?;
-
-    // 3. Prepare Header
-    let crc = calculate_checksum(batch_start_id, count, frame_type, &disk_payload);
+    let frame_type = if is_compressed { FrameType::Lz4 } else { FrameType::Raw };
+    let prefixes = if in_place { length_prefixes(entries) } else { Vec::new() };
+    let (disk_size, crc) = if in_place {
+      (raw_len, checksum_of_parts(batch_start_id, count, frame_type, raw_len, raw_parts(entries, &prefixes)))
+    } else {
+      (payload.len(), calculate_checksum(batch_start_id, count, frame_type, &payload))
+    };
 
     let header = FrameHeader {
       crc,
       start_id: batch_start_id,
       entry_count: count,
       frame_type,
-      disk_size: disk_payload.len() as u32,
-      uncompressed_size,
+      disk_size: disk_size as u32,
+      uncompressed_size: raw_len as u32,
     };
 
-    // 4. Write Header + Payload
     header.write(&mut inner.file).map_err(Error::Io)?;
-    inner.file.write_all(&disk_payload).map_err(Error::Io)?;
+    if in_place {
+      for part in raw_parts(entries, &prefixes) {
+        inner.file.write_all(part).map_err(Error::Io)?;
+      }
+    } else {
+      inner.file.write_all(&payload).map_err(Error::Io)?;
+    }
+    inner.current_size += FrameHeader::SIZE as u64 + disk_size as u64;
 
-    // 5. Update stats
-    let bytes_written = FrameHeader::SIZE as u64 + disk_payload.len() as u64;
-    inner.current_size += bytes_written;
+    if payload.capacity() <= KEPT_PAYLOAD_BUFFER {
+      payload.clear();
+      inner.payload = payload;
+    }
 
     Ok(batch_start_id..batch_start_id + count as u64)
   }
@@ -141,33 +172,46 @@ impl ActiveSegment {
     Ok(valid_end)
   }
 
-  fn compress_if_needed<'a>(
-    &self,
-    raw: &'a [u8],
-    options: &WalOptions,
-  ) -> Result<(FrameType, std::borrow::Cow<'a, [u8]>)> {
-    if options.compression == CompressionType::None || raw.len() < options.min_compression_size {
-      return Ok((FrameType::Raw, std::borrow::Cow::Borrowed(raw)));
+  /// Compresses the batch into `out` and returns whether the frame should be stored compressed. A batch below the
+  /// size threshold, or one that compression does not shrink, is stored raw and `out` holds nothing to write.
+  fn compress_into(entries: &[&[u8]], raw_len: usize, options: &WalOptions, out: &mut Vec<u8>) -> Result<bool> {
+    out.clear();
+    if options.compression == CompressionType::None || raw_len < options.min_compression_size {
+      return Ok(false);
     }
 
     #[cfg(feature = "compression")]
     {
       if options.compression == CompressionType::Lz4 {
-        let mut encoder = FrameEncoder::new(Vec::new());
-        encoder.write_all(raw).map_err(Error::Io)?;
-
-        let compressed = encoder
-          .finish()
-          .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
-
-        // Only use compression if we actually saved space
-        if compressed.len() < raw.len() {
-          return Ok((FrameType::Lz4, std::borrow::Cow::Owned(compressed)));
+        let mut encoder = FrameEncoder::with_frame_info(FrameInfo::new().block_size(BlockSize::Max256KB), std::mem::take(out));
+        let mut fed = 0usize;
+        let mut probed = false;
+        for entry in entries {
+          encoder.write_all(&(entry.len() as u32).to_le_bytes()).map_err(Error::Io)?;
+          encoder.write_all(entry).map_err(Error::Io)?;
+          fed += 4 + entry.len();
+          if !probed && fed >= COMPRESSION_PROBE_BYTES {
+            probed = true;
+            let flushed_input = fed.saturating_sub(COMPRESSION_BLOCK_BYTES);
+            if encoder.get_ref().len() >= flushed_input {
+              *out = encoder.into_inner();
+              out.clear();
+              return Ok(false);
+            }
+          }
         }
+        *out = encoder.finish().map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+        if out.len() < raw_len {
+          return Ok(true);
+        }
+        out.clear();
       }
     }
 
-    Ok((FrameType::Raw, std::borrow::Cow::Borrowed(raw)))
+    #[cfg(not(feature = "compression"))]
+    let _ = entries;
+
+    Ok(false)
   }
 }
 

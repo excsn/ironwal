@@ -87,20 +87,6 @@ impl FrameHeader {
   }
 }
 
-/// Helper to serialize a batch of entries into a raw buffer.
-/// Format per entry: [Len: 4][Data: N]
-pub fn serialize_batch(entries: &[&[u8]]) -> io::Result<Vec<u8>> {
-  // Pre-calculate size to avoid reallocations
-  let total_len: usize = entries.iter().map(|e| 4 + e.len()).sum();
-  let mut buffer = Vec::with_capacity(total_len);
-
-  for entry in entries {
-    buffer.write_u32::<LittleEndian>(entry.len() as u32)?;
-    buffer.write_all(entry)?;
-  }
-  Ok(buffer)
-}
-
 /// Helper to deserialize a raw buffer back into individual entries.
 pub fn deserialize_batch(buffer: &[u8]) -> Result<Vec<Vec<u8>>> {
   let mut cursor = Cursor::new(buffer);
@@ -118,13 +104,28 @@ pub fn deserialize_batch(buffer: &[u8]) -> Result<Vec<Vec<u8>>> {
 
 /// Calculates CRC32 for the frame content (excluding the Magic and CRC field itself).
 pub fn calculate_checksum(start_id: u64, count: u32, frame_type: FrameType, payload: &[u8]) -> u32 {
+  checksum_of_parts(start_id, count, frame_type, payload.len(), std::iter::once(payload))
+}
+
+/// The checksum of a payload held in pieces, equal to `calculate_checksum` over the pieces joined.
+pub fn checksum_of_parts<'a>(start_id: u64, count: u32, frame_type: FrameType, payload_len: usize, parts: impl IntoIterator<Item = &'a [u8]>) -> u32 {
   let mut hasher = Hasher::new();
   hasher.update(&start_id.to_le_bytes());
   hasher.update(&count.to_le_bytes());
   hasher.update(&[frame_type as u8]);
-  hasher.update(&(payload.len() as u32).to_le_bytes());
-  // Note: We don't hash uncompressed_size here for simplicity,
-  // but practically the payload hash covers integrity.
-  hasher.update(payload);
+  hasher.update(&(payload_len as u32).to_le_bytes());
+  // The uncompressed size is not hashed; the payload hash covers integrity.
+  for part in parts {
+    hasher.update(part);
+  }
   hasher.finalize()
+}
+
+/// The raw payload of a batch as the pieces it is written from: each entry's length prefix, then the entry.
+pub fn raw_parts<'a>(entries: &'a [&'a [u8]], prefixes: &'a [[u8; 4]]) -> impl Iterator<Item = &'a [u8]> + 'a {
+  entries.iter().zip(prefixes).flat_map(|(entry, prefix)| [prefix.as_slice(), *entry])
+}
+
+pub fn length_prefixes(entries: &[&[u8]]) -> Vec<[u8; 4]> {
+  entries.iter().map(|entry| (entry.len() as u32).to_le_bytes()).collect()
 }
