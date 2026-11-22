@@ -8,19 +8,19 @@
 
 ### `Append_Operations/append_single_strict`
 
-* **Time:** 10.541 ms - 10.638 ms - 10.741 ms
+* **Time:** 10.564 ms - 10.662 ms - 10.761 ms
 
 ### `Append_Operations/append_single_async`
 
-* **Time:** 6.3475 ms - 6.4548 ms - 6.5647 ms
+* **Time:** 963.76 µs - 973.86 µs - 988.37 µs
 
 ### `Append_Operations/append_batch_100_strict`
 
-* **Time:** 10.784 ms - 10.895 ms - 11.004 ms
+* **Time:** 10.853 ms - 10.930 ms - 11.008 ms
 
 ### `Append_Operations/append_batch_100_async`
 
-* **Time:** 6.4485 ms - 6.5493 ms - 6.6518 ms
+* **Time:** 988.15 µs - 994.32 µs - 999.69 µs
 
 ---
 
@@ -28,23 +28,23 @@
 
 ### `Read_Operations/read_random_get_std_io`
 
-* **Time:** 14.054 ms - 15.932 ms - 17.840 ms
+* **Time:** 302.69 µs - 319.15 µs - 335.81 µs
 
 ### `Read_Operations/read_random_get_mmap`
 
-* **Time:** 236.08 µs - 245.23 µs - 255.03 µs
+* **Time:** 212.60 µs - 220.60 µs - 229.64 µs
 
 ### `Read_Operations/read_random_get_mmap_cached`
 
-* **Time:** 367.69 µs - 416.65 µs - 475.42 µs
+* **Time:** 321.32 µs - 330.72 µs - 340.61 µs
 
 ### `Read_Operations/read_sequential_iter_std_io`
 
-* **Time:** 1.1298 ms - 1.1361 ms - 1.1428 ms
+* **Time:** 1.1812 ms - 1.1899 ms - 1.1994 ms
 
 ### `Read_Operations/read_sequential_iter_mmap`
 
-* **Time:** 926.83 µs - 933.70 µs - 941.30 µs
+* **Time:** 913.91 µs - 921.20 µs - 929.05 µs
 
 ---
 
@@ -52,7 +52,7 @@
 
 ### `Stress/CacheThrashing/write_round_robin_thrashing`
 
-* **Time:** 532.00 ms - 535.29 ms - 538.57 ms
+* **Time:** 550.35 ms - 554.49 ms - 558.44 ms
 
 ---
 
@@ -60,23 +60,23 @@
 
 ### `Stress/Concurrency/1`
 
-* **Time:** 7.2361 ms - 7.3698 ms - 7.5040 ms
-* **Throughput:** 13.326 Kelem/s - 13.569 Kelem/s - 13.820 Kelem/s
+* **Time:** 7.8261 ms - 8.5601 ms - 9.4336 ms
+* **Throughput:** 10.600 Kelem/s - 11.682 Kelem/s - 12.778 Kelem/s
 
 ### `Stress/Concurrency/4`
 
-* **Time:** 15.557 ms - 15.911 ms - 16.259 ms
-* **Throughput:** 24.602 Kelem/s - 25.139 Kelem/s - 25.711 Kelem/s
+* **Time:** 13.202 ms - 13.667 ms - 14.127 ms
+* **Throughput:** 28.314 Kelem/s - 29.267 Kelem/s - 30.298 Kelem/s
 
 ### `Stress/Concurrency/8`
 
-* **Time:** 27.230 ms - 27.927 ms - 28.645 ms
-* **Throughput:** 27.928 Kelem/s - 28.646 Kelem/s - 29.380 Kelem/s
+* **Time:** 22.024 ms - 22.452 ms - 22.883 ms
+* **Throughput:** 34.960 Kelem/s - 35.632 Kelem/s - 36.325 Kelem/s
 
 ### `Stress/Concurrency/16`
 
-* **Time:** 49.170 ms - 50.903 ms - 52.670 ms
-* **Throughput:** 30.378 Kelem/s - 31.432 Kelem/s - 32.540 Kelem/s
+* **Time:** 32.650 ms - 33.330 ms - 34.022 ms
+* **Throughput:** 47.028 Kelem/s - 48.005 Kelem/s - 49.005 Kelem/s
 
 ---
 
@@ -84,7 +84,7 @@
 
 ### `Stress/Recovery/recover_10k_entries_1k_segments`
 
-* **Time:** 923.94 µs - 925.86 µs - 927.94 µs
+* **Time:** 1.1220 ms - 1.1276 ms - 1.1341 ms
 
 ---
 
@@ -92,95 +92,110 @@
 
 ### `ShardedWal/Append/single_async/4`
 
-* **Time:** 3.0557 µs - 3.0906 µs - 3.1342 µs
+* **Time:** 3.0718 µs - 3.1042 µs - 3.1497 µs
 
 ### `ShardedWal/Append/single_async/16`
 
-* **Time:** 3.3058 µs - 3.3519 µs - 3.4152 µs
+* **Time:** 3.1823 µs - 3.2107 µs - 3.2411 µs
 
 ### `ShardedWal/Append/single_async/64`
 
-* **Time:** 4.1715 µs - 4.2643 µs - 4.3721 µs
+* **Time:** 3.3203 µs - 3.3782 µs - 3.4448 µs
 
 ### `ShardedWal/Batch/batch_100/4`
 
-* **Time:** 27.362 µs - 27.501 µs - 27.663 µs
-* **Throughput:** 3.6150 Melem/s - 3.6362 Melem/s - 3.6548 Melem/s
+* **Time:** 35.454 µs - 35.845 µs - 36.391 µs
+* **Throughput:** 2.7479 Melem/s - 2.7898 Melem/s - 2.8206 Melem/s
 
 ### `ShardedWal/Batch/batch_100/16`
 
-* **Time:** 77.103 µs - 77.931 µs - 78.997 µs
-* **Throughput:** 1.2659 Melem/s - 1.2832 Melem/s - 1.2970 Melem/s
+* **Time:** 100.72 µs - 101.99 µs - 103.30 µs
+* **Throughput:** 968.05 Kelem/s - 980.45 Kelem/s - 992.83 Kelem/s
 
 ### `ShardedWal/Batch/batch_100/64`
 
-* **Time:** 269.70 µs - 275.15 µs - 281.43 µs
-* **Throughput:** 355.33 Kelem/s - 363.43 Kelem/s - 370.78 Kelem/s
+* **Time:** 282.51 µs - 287.65 µs - 293.91 µs
+* **Throughput:** 340.24 Kelem/s - 347.64 Kelem/s - 353.97 Kelem/s
+
+### `ShardedWal/Batch/batch_100_buffered/4`
+
+* **Time:** 17.270 µs - 17.612 µs - 18.032 µs
+* **Throughput:** 5.5457 Melem/s - 5.6781 Melem/s - 5.7905 Melem/s
+
+### `ShardedWal/Batch/batch_100_buffered/16`
+
+* **Time:** 38.422 µs - 38.908 µs - 39.556 µs
+* **Throughput:** 2.5281 Melem/s - 2.5701 Melem/s - 2.6027 Melem/s
+
+### `ShardedWal/Batch/batch_100_buffered/64`
+
+* **Time:** 108.81 µs - 121.23 µs - 136.42 µs
+* **Throughput:** 733.00 Kelem/s - 824.90 Kelem/s - 919.00 Kelem/s
 
 ### `ShardedWal/Routing/core_wal_baseline`
 
-* **Time:** 3.2050 µs - 3.2471 µs - 3.3128 µs
+* **Time:** 3.0495 µs - 3.0889 µs - 3.1368 µs
 
 ### `ShardedWal/Routing/sharded_16`
 
-* **Time:** 3.2804 µs - 3.3100 µs - 3.3472 µs
+* **Time:** 3.1667 µs - 3.1929 µs - 3.2220 µs
 
 ### `ShardedWal/Checkpoint/Create/create/4`
 
-* **Time:** 13.419 ms - 13.585 ms - 13.750 ms
+* **Time:** 13.627 ms - 13.773 ms - 13.921 ms
 
 ### `ShardedWal/Checkpoint/Create/create/16`
 
-* **Time:** 13.554 ms - 13.708 ms - 13.873 ms
+* **Time:** 13.553 ms - 13.690 ms - 13.836 ms
 
 ### `ShardedWal/Checkpoint/Create/create/64`
 
-* **Time:** 13.393 ms - 13.508 ms - 13.623 ms
+* **Time:** 13.673 ms - 13.800 ms - 13.927 ms
 
 ### `ShardedWal/Checkpoint/Load/load/4`
 
-* **Time:** 7.9481 µs - 7.9808 µs - 8.0183 µs
+* **Time:** 9.0546 µs - 9.1043 µs - 9.1629 µs
 
 ### `ShardedWal/Checkpoint/Load/load/16`
 
-* **Time:** 8.6235 µs - 8.7087 µs - 8.8120 µs
+* **Time:** 9.7539 µs - 9.8382 µs - 9.9410 µs
 
 ### `ShardedWal/Checkpoint/Load/load/64`
 
-* **Time:** 10.224 µs - 10.427 µs - 10.650 µs
+* **Time:** 10.909 µs - 11.166 µs - 11.448 µs
 
 ### `ShardedWal/Checkpoint/Scale/load_with_count/10`
 
-* **Time:** 8.1019 µs - 8.2081 µs - 8.4020 µs
+* **Time:** 9.2478 µs - 9.3177 µs - 9.4060 µs
 
 ### `ShardedWal/Checkpoint/Scale/load_with_count/100`
 
-* **Time:** 8.2893 µs - 8.3479 µs - 8.4884 µs
+* **Time:** 9.2445 µs - 9.3232 µs - 9.4846 µs
 
 ### `ShardedWal/Checkpoint/Scale/load_with_count/500`
 
-* **Time:** 8.2342 µs - 8.3875 µs - 8.7032 µs
+* **Time:** 9.2347 µs - 9.5416 µs - 10.183 µs
 
 ### `ShardedWal/Concurrency/Writes/threads/1`
 
-* **Time:** 6.3460 ms - 7.1171 ms - 7.8163 ms
-* **Throughput:** 12.794 Kelem/s - 14.051 Kelem/s - 15.758 Kelem/s
+* **Time:** 6.8026 ms - 7.3672 ms - 7.8474 ms
+* **Throughput:** 12.743 Kelem/s - 13.574 Kelem/s - 14.700 Kelem/s
 
 ### `ShardedWal/Concurrency/Writes/threads/4`
 
-* **Time:** 6.9623 ms - 7.7347 ms - 8.4990 ms
-* **Throughput:** 47.064 Kelem/s - 51.715 Kelem/s - 57.452 Kelem/s
+* **Time:** 8.1274 ms - 8.5700 ms - 9.0042 ms
+* **Throughput:** 44.424 Kelem/s - 46.674 Kelem/s - 49.216 Kelem/s
 
 ### `ShardedWal/Concurrency/Writes/threads/8`
 
-* **Time:** 9.2769 ms - 10.226 ms - 11.124 ms
-* **Throughput:** 71.915 Kelem/s - 78.236 Kelem/s - 86.235 Kelem/s
+* **Time:** 9.5532 ms - 10.051 ms - 10.576 ms
+* **Throughput:** 75.643 Kelem/s - 79.595 Kelem/s - 83.742 Kelem/s
 
 ### `ShardedWal/Concurrency/Writes/threads/16`
 
-* **Time:** 10.998 ms - 11.913 ms - 12.780 ms
-* **Throughput:** 125.20 Kelem/s - 134.30 Kelem/s - 145.48 Kelem/s
+* **Time:** 10.902 ms - 11.492 ms - 12.130 ms
+* **Throughput:** 131.90 Kelem/s - 139.23 Kelem/s - 146.76 Kelem/s
 
 ### `ShardedWal/Concurrency/Checkpoint/write_and_checkpoint`
 
-* **Time:** 146.03 ms - 147.71 ms - 149.50 ms
+* **Time:** 148.30 ms - 149.83 ms - 151.51 ms
