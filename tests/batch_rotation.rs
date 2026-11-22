@@ -5,7 +5,7 @@ use ironwal::WalOptions;
 const SEGMENT_BYTES: u64 = 1024;
 
 fn options() -> WalOptions {
-  WalOptions { max_segment_size: SEGMENT_BYTES, ..WalOptions::default() }
+  WalOptions::default().max_segment_size(SEGMENT_BYTES)
 }
 
 fn segment_sizes(env: &TestEnv, stream: &str) -> Vec<u64> {

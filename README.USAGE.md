@@ -21,8 +21,7 @@ use ironwal::{Wal, WalOptions, SyncMode};
 
 fn main() -> ironwal::Result<()> {
     // 1. Configure the WAL
-    let mut opts = WalOptions::new("./my_wal_data");
-    opts.sync_mode = SyncMode::Strict; // Ensure durability
+    let opts = WalOptions::new("./my_wal_data").sync_mode(SyncMode::Strict);
 
     // 2. Open the WAL
     let wal = Wal::new(opts)?;
@@ -173,10 +172,7 @@ use ironwal::WalOptions;
 // Enable the feature in Cargo.toml:
 // ironwal = { version = "0.6", features = ["sharded"] }
 
-let mut opts = WalOptions::default();
-opts.root_path = "./data".into();
-
-let wal = ShardedWal::new(opts, 16)?;
+let wal = ShardedWal::new(WalOptions::new("./data"), 16)?;
 
 // Append with automatic routing
 let (shard_id, seq_id) = wal.append(b"user_123", b"profile_data")?;

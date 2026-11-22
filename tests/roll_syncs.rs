@@ -4,7 +4,7 @@ use ironwal::{SyncMode, Wal, WalOptions};
 use std::fs;
 
 fn rolling(sync_mode: SyncMode) -> WalOptions {
-  WalOptions { sync_mode, max_segment_size: 256, max_entries_per_segment: u64::MAX, ..WalOptions::default() }
+  WalOptions::default().sync_mode(sync_mode).max_segment_size(256).max_entries_per_segment(u64::MAX)
 }
 
 fn segments(env: &TestEnv, stream: &str) -> usize {
@@ -51,7 +51,7 @@ fn a_roll_in_batch_only_mode_costs_one_directory_fsync_beside_the_segment_syncs(
 #[test]
 fn a_segment_missing_from_the_index_is_found_on_reopen() {
   let dir = tempfile::tempdir().unwrap();
-  let options = WalOptions { root_path: dir.path().to_path_buf(), ..rolling(SyncMode::Async) };
+  let options = rolling(SyncMode::Async).root_path(dir.path().to_path_buf());
   let entry = vec![4u8; 100];
   {
     let wal = Wal::new(options.clone()).unwrap();
@@ -75,7 +75,7 @@ fn a_segment_missing_from_the_index_is_found_on_reopen() {
 #[test]
 fn an_unreadable_head_state_is_ignored_on_reopen() {
   let dir = tempfile::tempdir().unwrap();
-  let options = WalOptions { root_path: dir.path().to_path_buf(), ..rolling(SyncMode::Async) };
+  let options = rolling(SyncMode::Async).root_path(dir.path().to_path_buf());
   let entry = vec![5u8; 100];
   {
     let wal = Wal::new(options.clone()).unwrap();

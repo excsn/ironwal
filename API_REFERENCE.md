@@ -21,7 +21,11 @@ IronWal is a durable Write-Ahead Log library designed for sequential, append-onl
 ## 2. Configuration
 
 ### `struct WalOptions`
-Configuration for initializing the WAL.
+Configuration for initializing the WAL. `#[non_exhaustive]`, so it cannot be built with a struct literal outside the crate. Start from `WalOptions::new(path)` or `WalOptions::default()` and chain a setter per field. Assigning to the public fields also works.
+
+**Constructors and setters:**
+*   `pub fn new(path: impl Into<PathBuf>) -> Self` - Defaults with `root_path` set.
+*   One setter per field, each `pub fn <field>(self, value) -> Self`: `root_path(impl Into<PathBuf>)`, `max_segment_size(u64)`, `max_entries_per_segment(u64)`, `max_open_segments(usize)`, `max_open_read_segments(usize)`, `write_buffer_size(usize)`, `read_buffer_size(usize)`, `block_cache_size(u64)` (sets `Some`), `sync_mode(SyncMode)`, `buffer_appends(bool)`, `compression(CompressionType)`, `read_strategy(ReadStrategy)`, `on_corruption(CorruptionPolicy)`, `min_compression_size(usize)`, `archive_path(impl Into<PathBuf>)` (sets `Some`).
 
 **Fields:**
 *   `pub root_path: PathBuf` - Directory where stream data is stored.
@@ -39,6 +43,8 @@ Configuration for initializing the WAL.
 *   `pub on_corruption: CorruptionPolicy` - Action to take when corrupted data is found.
 *   `pub min_compression_size: usize` - Minimum payload size required to trigger compression.
 *   `pub archive_path: Option<PathBuf>` - Where `truncate` moves freed segments (`{archive_path}/{stream}/{segment}`) instead of deleting them; `restore_archived` moves them back. Must lie outside `root_path`. Default: None.
+
+`SyncMode`, `ReadStrategy`, `CompressionType` and `CorruptionPolicy` are `#[non_exhaustive]`: a `match` on one outside the crate needs a `_` arm.
 
 ### `enum SyncMode`
 Defines durability guarantees.

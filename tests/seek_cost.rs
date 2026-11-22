@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 const FRAMES: u64 = 100_000;
 
 fn options(root: &std::path::Path, read_strategy: ReadStrategy) -> WalOptions {
-  WalOptions { root_path: root.to_path_buf(), sync_mode: SyncMode::Async, max_segment_size: u64::MAX / 4, read_strategy, ..WalOptions::default() }
+  WalOptions::default().root_path(root.to_path_buf()).sync_mode(SyncMode::Async).max_segment_size(u64::MAX / 4).read_strategy(read_strategy)
 }
 
 fn open_seek_and_get(root: &std::path::Path, read_strategy: ReadStrategy) -> Duration {

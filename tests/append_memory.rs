@@ -95,7 +95,7 @@ fn incompressible(salt: u64) -> Vec<Vec<u8>> {
 }
 
 fn options(root: &std::path::Path, compression: CompressionType) -> WalOptions {
-  WalOptions { root_path: root.to_path_buf(), sync_mode: SyncMode::Async, max_segment_size: u64::MAX / 4, compression, ..WalOptions::default() }
+  WalOptions::default().root_path(root.to_path_buf()).sync_mode(SyncMode::Async).max_segment_size(u64::MAX / 4).compression(compression)
 }
 
 fn slices(batch: &[Vec<u8>]) -> Vec<&[u8]> {

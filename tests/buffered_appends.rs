@@ -5,7 +5,7 @@ const STREAM: &str = "s";
 const ENTRY: [u8; 100] = [7u8; 100];
 
 fn options(root: &Path, sync_mode: SyncMode, buffer_appends: bool) -> WalOptions {
-  WalOptions { root_path: root.to_path_buf(), sync_mode, buffer_appends, ..WalOptions::default() }
+  WalOptions::default().root_path(root.to_path_buf()).sync_mode(sync_mode).buffer_appends(buffer_appends)
 }
 
 fn bytes_on_disk(root: &Path, segment_start_id: u64) -> u64 {
@@ -52,7 +52,7 @@ fn buffering_is_ignored_outside_async() {
 
 fn reads_see_buffered_appends(read_strategy: ReadStrategy) {
   let dir = tempfile::tempdir().unwrap();
-  let wal = Wal::new(WalOptions { read_strategy, ..options(dir.path(), SyncMode::Async, true) }).unwrap();
+  let wal = Wal::new(options(dir.path(), SyncMode::Async, true).read_strategy(read_strategy)).unwrap();
   let written = entries(5);
   wal.append(STREAM, &written[0]).unwrap();
   assert_eq!(wal.get(STREAM, 0).unwrap().as_deref(), Some(written[0].as_slice()), "get missed a buffered append");
@@ -84,7 +84,7 @@ fn reads_with_mmap_see_every_buffered_append_that_returned() {
 #[test]
 fn buffered_appends_on_both_sides_of_a_segment_roll_read_back() {
   let dir = tempfile::tempdir().unwrap();
-  let wal = Wal::new(WalOptions { max_segment_size: 1024, ..options(dir.path(), SyncMode::Async, true) }).unwrap();
+  let wal = Wal::new(options(dir.path(), SyncMode::Async, true).max_segment_size(1024)).unwrap();
   let written = entries(40);
   for entry in &written[..20] {
     wal.append(STREAM, entry).unwrap();
@@ -101,7 +101,7 @@ fn buffered_appends_on_both_sides_of_a_segment_roll_read_back() {
 #[test]
 fn buffered_appends_survive_their_segment_leaving_the_write_cache() {
   let dir = tempfile::tempdir().unwrap();
-  let wal = Wal::new(WalOptions { max_open_segments: 1, ..options(dir.path(), SyncMode::Async, true) }).unwrap();
+  let wal = Wal::new(options(dir.path(), SyncMode::Async, true).max_open_segments(1)).unwrap();
   let written = entries(200);
   for round in 0..100 {
     wal.append(STREAM, &written[round * 2]).unwrap();

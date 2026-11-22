@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 /// Defines how often the WAL flushes data to the physical disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SyncMode {
   /// Call `fsync` after every single `append` operation.
   /// Safest, but highest latency.
@@ -19,6 +20,7 @@ pub enum SyncMode {
 
 /// Defines the strategy used for reading segment files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReadStrategy {
   /// Uses standard `File::seek` and `File::read`.
   /// Safe, reliable, and respectful of memory limits.
@@ -32,6 +34,7 @@ pub enum ReadStrategy {
 
 /// Defines the compression algorithm used for Frame Payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CompressionType {
   /// No compression. Raw binary copy.
   None,
@@ -44,6 +47,7 @@ pub enum CompressionType {
 
 /// Policy for handling corrupted data during recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CorruptionPolicy {
   /// Truncate the file at the last valid record and log a warning.
   /// Allows the system to start, losing only the corrupted tail.
@@ -55,6 +59,7 @@ pub enum CorruptionPolicy {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WalOptions {
   /// Base directory where stream directories are created.
   pub root_path: PathBuf,
@@ -147,5 +152,80 @@ impl WalOptions {
       root_path: path.into(),
       ..Default::default()
     }
+  }
+
+  pub fn root_path(mut self, value: impl Into<PathBuf>) -> Self {
+    self.root_path = value.into();
+    self
+  }
+
+  pub fn max_segment_size(mut self, value: u64) -> Self {
+    self.max_segment_size = value;
+    self
+  }
+
+  pub fn max_entries_per_segment(mut self, value: u64) -> Self {
+    self.max_entries_per_segment = value;
+    self
+  }
+
+  pub fn max_open_segments(mut self, value: usize) -> Self {
+    self.max_open_segments = value;
+    self
+  }
+
+  pub fn max_open_read_segments(mut self, value: usize) -> Self {
+    self.max_open_read_segments = value;
+    self
+  }
+
+  pub fn write_buffer_size(mut self, value: usize) -> Self {
+    self.write_buffer_size = value;
+    self
+  }
+
+  pub fn read_buffer_size(mut self, value: usize) -> Self {
+    self.read_buffer_size = value;
+    self
+  }
+
+  pub fn block_cache_size(mut self, value: u64) -> Self {
+    self.block_cache_size = Some(value);
+    self
+  }
+
+  pub fn sync_mode(mut self, value: SyncMode) -> Self {
+    self.sync_mode = value;
+    self
+  }
+
+  pub fn buffer_appends(mut self, value: bool) -> Self {
+    self.buffer_appends = value;
+    self
+  }
+
+  pub fn compression(mut self, value: CompressionType) -> Self {
+    self.compression = value;
+    self
+  }
+
+  pub fn read_strategy(mut self, value: ReadStrategy) -> Self {
+    self.read_strategy = value;
+    self
+  }
+
+  pub fn on_corruption(mut self, value: CorruptionPolicy) -> Self {
+    self.on_corruption = value;
+    self
+  }
+
+  pub fn min_compression_size(mut self, value: usize) -> Self {
+    self.min_compression_size = value;
+    self
+  }
+
+  pub fn archive_path(mut self, value: impl Into<PathBuf>) -> Self {
+    self.archive_path = Some(value.into());
+    self
   }
 }

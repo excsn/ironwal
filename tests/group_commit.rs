@@ -5,7 +5,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 fn options(sync_mode: SyncMode) -> WalOptions {
-  WalOptions { sync_mode, ..WalOptions::default() }
+  WalOptions::default().sync_mode(sync_mode)
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn async_mode_issues_no_fsync() {
 
 #[test]
 fn a_batch_spanning_a_rotation_syncs_the_file_it_left() {
-  let env = TestEnv::new(WalOptions { sync_mode: SyncMode::BatchOnly, max_segment_size: 256, ..WalOptions::default() });
+  let env = TestEnv::new(WalOptions::default().sync_mode(SyncMode::BatchOnly).max_segment_size(256));
   let entry = vec![7u8; 100];
   env.wal.append_batch("rotating", &[&entry, &entry, &entry, &entry]).unwrap();
   let entries: Vec<Vec<u8>> = env.wal.iter("rotating", 0).unwrap().map(Result::unwrap).collect();
