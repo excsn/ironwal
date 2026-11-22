@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/ironwal.svg)](https://crates.io/crates/ironwal)
 [![Documentation](https://docs.rs/ironwal/badge.svg)](https://docs.rs/ironwal)
 
-IronWal is a high-durability, deterministic Write-Ahead Log (WAL) designed for systems of record, such as financial ledgers, game state synchronization, and event stores. It prioritizes data integrity, precise replication control, and predictable resource usage over raw, unsafe throughput, providing a robust foundation for building crash-safe applications.
+IronWal is a high-durability, deterministic Write-Ahead Log (WAL) designed for systems of record, such as financial ledgers, game state synchronization and event stores. It prioritizes data integrity, precise replication control and predictable resource usage over raw, unsafe throughput, providing a robust foundation for building crash-safe applications.
 
 ## Installation
 
@@ -53,35 +53,35 @@ Atomic batch writes (`append_batch`, `TxnWriter`) and disk reclamation (`truncat
 
 ## Core Concepts
 
-* **Stream** — an independent, append-only sequence of records, addressed by name. Each stream maps to its own directory on disk.
-* **Entry** — a single binary record. Every entry in a stream gets a monotonically increasing 64-bit sequence ID.
-* **Segment** — streams are stored as segment files that rotate automatically at configurable size/count thresholds. Truncation reclaims disk space by deleting whole segments below a safe ID.
+* **Stream**: an independent, append-only sequence of records, addressed by name. Each stream maps to its own directory on disk.
+* **Entry**: a single binary record. Every entry in a stream gets a monotonically increasing 64-bit sequence ID.
+* **Segment**: streams are stored as segment files that rotate automatically at configurable size/count thresholds. Truncation reclaims disk space by deleting whole segments below a safe ID.
 
 ## Key Features
 
 ### Deterministic Storage
-Stream names map explicitly to physical directories on disk. This deterministic structure simplifies external backups, replication strategies, and manual auditing of the log files.
+Stream names map explicitly to physical directories on disk. This deterministic structure simplifies external backups, replication strategies and manual auditing of the log files.
 
 ### Data Integrity & Safety
-Every frame written to disk is protected by a CRC32 checksum to detect bit rot and disk corruption. The library includes a rigorous recovery system capable of handling partial writes, power failures, and corrupted indices without data loss.
+Every frame written to disk is protected by a CRC32 checksum to detect bit rot and disk corruption. The library includes a rigorous recovery system capable of handling partial writes, power failures and corrupted indices without data loss.
 
 ### Hybrid Compression
 To balance storage efficiency and latency, IronWal employs a hybrid compression strategy. Frames can be stored as raw binary or compressed using the LZ4 format, automatically decided based on configurable size thresholds.
 
 ### Per-Stream Concurrency
-`Wal` is cheaply cloneable and thread-safe. Locking is per stream, so appending to one stream never blocks writers on other streams — throughput scales with the number of independent streams being written.
+`Wal` is cheaply cloneable and thread-safe. Locking is per stream, so appending to one stream never blocks writers on other streams. Throughput scales with the number of independent streams being written.
 
 ### Resource Protection
 Open file descriptors are held in bounded LRU caches, for both writing and reading. This prevents the application from exhausting system file handle limits, even when managing thousands of active streams.
 
 ### Tunable Durability
-Developers can choose between three synchronization modes: `Strict` (fsync on every write), `BatchOnly` (fsync only on batches/transactions), and `Async` (rely on OS page cache), allowing for precise trade-offs between latency and safety.
+Developers can choose between three synchronization modes: `Strict` (fsync on every write), `BatchOnly` (fsync only on batches/transactions) and `Async` (rely on OS page cache), allowing for precise trade-offs between latency and safety.
 
 ## Sharded WAL (optional `sharded` feature)
 
-Everything above is the core, always-available API. For write volumes beyond what a single stream can absorb, the optional `ShardedWal` builds on top of `Wal`: it partitions writes across a fixed number of internal streams (`shard_00`, `shard_01`, …) by hashing a key you supply. The key only routes the write — it is not stored — and each entry is addressed by `(shard_id, seq_id)`. On top of this partitioning, `ShardedWal` adds **checkpoints** — a consistent cut of every shard's durable offset, tagged with an ID you choose (a Raft index, transaction ID, ULID, …) — and **pruning** of segments older than a checkpoint.
+Everything above is the core, always-available API. For write volumes beyond what a single stream can absorb, the optional `ShardedWal` builds on top of `Wal`: it partitions writes across a fixed number of internal streams (`shard_00`, `shard_01`, …) by hashing a key you supply. The key only routes the write and is not stored. Each entry is addressed by `(shard_id, seq_id)`. On top of this partitioning, `ShardedWal` adds **checkpoints** and **pruning** of segments older than a checkpoint. A checkpoint is a consistent cut of every shard's durable offset, tagged with an ID you choose (a Raft index, transaction ID, ULID, …).
 
-Note that this is a different mechanism from the per-stream concurrency above: the core `Wal` already lets independent streams proceed in parallel. Reach for `ShardedWal` only when the throughput of a *single* logical stream is the bottleneck. In exchange you give up per-key `get` (reads are per-shard iteration), atomicity of batches that span shards, and the ability to change the shard count without a migration.
+Note that this is a different mechanism from the per-stream concurrency above: the core `Wal` already lets independent streams proceed in parallel. Reach for `ShardedWal` only when the throughput of a *single* logical stream is the bottleneck. In exchange you give up per-key `get` (reads are per-shard iteration), atomicity of batches that span shards and the ability to change the shard count without a migration.
 
 ```toml
 [dependencies]
@@ -105,7 +105,7 @@ wal.create_checkpoint(b"raft_index_5000")?;
 wal.prune_before_checkpoint(b"raft_index_5000")?;
 ```
 
-Restoring from checkpoints, batch writes, durability caveats under `BatchOnly`/`Async`, and shard-count sizing are covered in the [Usage Guide](README.USAGE.md#sharded-wal-optional-feature).
+Restoring from checkpoints, batch writes, durability caveats under `BatchOnly`/`Async` and shard-count sizing are covered in the [Usage Guide](README.USAGE.md#sharded-wal-optional-feature).
 
 ## Notable Users
 
@@ -113,7 +113,7 @@ Restoring from checkpoints, batch writes, durability caveats under `BatchOnly`/`
 
 ## Documentation
 
-For a detailed guide on configuration, API usage, and architectural concepts, please see the **[Usage Guide](README.USAGE.md)**.
+For a detailed guide on configuration, API usage and architectural concepts, please see the **[Usage Guide](README.USAGE.md)**.
 
 You can also view the full API reference documentation on [docs.rs](https://docs.rs/ironwal).
 

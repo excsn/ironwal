@@ -1,6 +1,6 @@
 # Usage Guide: IronWal
 
-This guide provides a comprehensive overview of how to integrate, configure, and operate the IronWal library in your Rust applications.
+This guide provides a comprehensive overview of how to integrate, configure and operate the IronWal library in your Rust applications.
 
 ## Core Concepts
 
@@ -14,7 +14,7 @@ IronWal operates on a few fundamental abstractions designed to map logical data 
 ## Quick Start
 
 ### Basic Read/Write
-This example demonstrates initializing the WAL, appending a single record, and reading it back.
+This example demonstrates initializing the WAL, appending a single record and reading it back.
 
 ```rust
 use ironwal::{Wal, WalOptions, SyncMode};
@@ -145,7 +145,7 @@ assert_eq!(id, 0);
 
 ## Sharded WAL (Optional Feature)
 
-For applications that need to scale write throughput beyond a single stream, IronWal provides `ShardedWal` — a horizontal sharding extension with built-in checkpointing.
+For applications that need to scale write throughput beyond a single stream, IronWal provides `ShardedWal`, a horizontal sharding extension with built-in checkpointing.
 
 ### When to Use Sharding
 
@@ -379,9 +379,9 @@ println!("Reclaimed {} bytes", stats.bytes_reclaimed);
 
 | Write Throughput | Recommended Shards |
 | ---------------- | ------------------ |
-| < 50 MB/s        | 4–8                |
-| 50–200 MB/s      | 16–32              |
-| 200–500 MB/s     | 64–128             |
+| < 50 MB/s        | 4-8                |
+| 50-200 MB/s      | 16-32              |
+| 200-500 MB/s     | 64-128             |
 | > 500 MB/s       | 256+               |
 
 **Rule of thumb:**

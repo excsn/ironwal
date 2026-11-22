@@ -56,7 +56,7 @@
 
 ---
 
-## Stress — Concurrency
+## Stress Concurrency
 
 ### `Stress/Concurrency/1`
 
@@ -80,7 +80,7 @@
 
 ---
 
-## Stress — Recovery
+## Stress Recovery
 
 ### `Stress/Recovery/recover_10k_entries_1k_segments`
 
